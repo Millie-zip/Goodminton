@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buaa-badminton-booking"
+version = "0.1.0"
+description = "BUAA badminton reservation assistant with an iPhone control page"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "keyring>=25,<27",
+  "playwright>=1.52,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+buaa-booking = "buaa_booking.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+
