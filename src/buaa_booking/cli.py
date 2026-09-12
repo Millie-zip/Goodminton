@@ -14,7 +14,7 @@ from .calibration import calibrate
 from .config import AppConfig, load_config
 from .dashboard import dashboard_url, serve_dashboard
 from .models import DailyPlan, PlanStatus
-from .notifier import ConsoleNotifier, PushoverNotifier
+from .notifier import BarkNotifier, ConsoleNotifier
 from .secrets import SecretStore
 from .store import StateStore
 
@@ -57,8 +57,8 @@ def _load_runtime(config_path: Path) -> tuple[AppConfig, StateStore, SecretStore
     root = config_path.resolve().parent.parent
     store = StateStore(root / "data" / "state.sqlite3")
     secrets = SecretStore()
-    if config.notification.provider.lower() == "pushover":
-        notifier: Any = PushoverNotifier(config.notification, secrets)
+    if config.notification.provider.lower() == "bark":
+        notifier: Any = BarkNotifier(config.notification, secrets)
     elif config.notification.provider.lower() == "console":
         notifier = ConsoleNotifier()
     else:
@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> None:
         root = args.config.resolve().parent.parent
 
         if args.command == "setup-secrets":
-            secrets.interactive_setup()
+            secrets.interactive_setup(config.notification.provider)
             print("账号和通知密钥已保存到系统凭据库。")
         elif args.command == "serve":
             serve_dashboard(config, store, secrets)

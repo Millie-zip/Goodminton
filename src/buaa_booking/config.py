@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from .models import parse_clock, validate_time_window
@@ -19,9 +20,12 @@ class DashboardConfig:
 @dataclass(frozen=True, slots=True)
 class NotificationConfig:
     provider: str
+    bark_server: str
     remote_control_url: str
-    emergency_retry_seconds: int
-    emergency_expire_seconds: int
+    emergency_level: str
+    emergency_sound: str
+    emergency_volume: int
+    emergency_call: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,12 +103,16 @@ def load_config(path: Path) -> AppConfig:
     if not profile_dir.is_absolute():
         profile_dir = path.parent.parent / profile_dir
 
-    retry_seconds = int(_required(notification_raw, "emergency_retry_seconds"))
-    expire_seconds = int(_required(notification_raw, "emergency_expire_seconds"))
-    if retry_seconds < 30:
-        raise ValueError("Pushover 紧急通知的重试间隔不能小于 30 秒")
-    if not retry_seconds < expire_seconds <= 10800:
-        raise ValueError("紧急通知过期时间必须大于重试间隔且不超过 10800 秒")
+    bark_server = str(_required(notification_raw, "bark_server")).rstrip("/")
+    parsed_bark_server = urlparse(bark_server)
+    if parsed_bark_server.scheme not in {"http", "https"} or not parsed_bark_server.netloc:
+        raise ValueError("bark_server 必须是有效的 HTTP(S) 地址")
+    emergency_level = str(_required(notification_raw, "emergency_level"))
+    if emergency_level not in {"critical", "active", "timeSensitive", "passive"}:
+        raise ValueError("Bark emergency_level 不受支持")
+    emergency_volume = int(_required(notification_raw, "emergency_volume"))
+    if not 0 <= emergency_volume <= 10:
+        raise ValueError("Bark emergency_volume 必须在 0 到 10 之间")
     navigation_timeout_ms = int(_required(browser_raw, "navigation_timeout_ms"))
     captcha_timeout = int(_required(browser_raw, "manual_captcha_timeout_seconds"))
     payment_hold = int(_required(browser_raw, "payment_hold_seconds"))
@@ -134,9 +142,12 @@ def load_config(path: Path) -> AppConfig:
         ),
         notification=NotificationConfig(
             provider=str(_required(notification_raw, "provider")),
+            bark_server=bark_server,
             remote_control_url=str(_required(notification_raw, "remote_control_url")),
-            emergency_retry_seconds=retry_seconds,
-            emergency_expire_seconds=expire_seconds,
+            emergency_level=emergency_level,
+            emergency_sound=str(_required(notification_raw, "emergency_sound")),
+            emergency_volume=emergency_volume,
+            emergency_call=bool(_required(notification_raw, "emergency_call")),
         ),
         browser=BrowserConfig(
             profile_dir=profile_dir.resolve(),

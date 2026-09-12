@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -10,15 +9,29 @@ from .config import NotificationConfig
 from .secrets import SecretStore
 
 
-PUSHOVER_ENDPOINT = "https://api.pushover.net/1/messages.json"
-
-
 class NotificationError(RuntimeError):
     pass
 
 
+class BarkRegistrationError(NotificationError):
+    pass
+
+
+def _raise_safe_bark_error(status_code: int, server_message: object) -> None:
+    message = str(server_message or "").lower()
+    if "device token" in message and ("failed to get" in message or "not found" in message):
+        raise BarkRegistrationError(
+            "Bark Device Key 尚未在当前服务器注册。请在 iPhone 打开 Bark，"
+            "等待几秒后复制首页的完整测试地址，再运行 setup-secrets 覆盖旧 Key。"
+        )
+    raise NotificationError(
+        f"Bark 拒绝了通知请求（HTTP {status_code}）。"
+        "请检查 bark_server 与 Device Key 是否来自同一个 Bark 服务。"
+    )
+
+
 @dataclass(slots=True)
-class PushoverNotifier:
+class BarkNotifier:
     config: NotificationConfig
     secrets: SecretStore
 
@@ -30,20 +43,21 @@ class PushoverNotifier:
         emergency: bool = False,
         url: str | None = None,
         url_title: str | None = None,
-    ) -> dict[str, str]:
-        payload = {
-            "token": self.secrets.get("pushover_app_token", required=True) or "",
-            "user": self.secrets.get("pushover_user_key", required=True) or "",
+    ) -> dict[str, str | int]:
+        payload: dict[str, str | int] = {
+            "device_key": self.secrets.get("bark_device_key", required=True) or "",
             "title": title,
-            "message": message,
-            "priority": "2" if emergency else "0",
+            "body": message,
+            "group": "北航羽毛球预约",
         }
         if emergency:
-            payload["retry"] = str(self.config.emergency_retry_seconds)
-            payload["expire"] = str(self.config.emergency_expire_seconds)
+            payload["level"] = self.config.emergency_level
+            payload["sound"] = self.config.emergency_sound
+            payload["volume"] = self.config.emergency_volume
+            if self.config.emergency_call:
+                payload["call"] = "1"
         if url:
             payload["url"] = url
-            payload["url_title"] = url_title or "打开"
         return payload
 
     def send(
@@ -62,20 +76,31 @@ class PushoverNotifier:
             url=url,
             url_title=url_title,
         )
+        endpoint = f"{self.config.bark_server.rstrip('/')}/push"
         request = urllib.request.Request(
-            PUSHOVER_ENDPOINT,
-            data=urllib.parse.urlencode(payload).encode("utf-8"),
+            endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST",
         )
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = json.loads(exc.read().decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                error_body = {}
+            try:
+                _raise_safe_bark_error(exc.code, error_body.get("message") or exc.reason)
+            except NotificationError as error:
+                raise error from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise NotificationError("Pushover 通知发送失败") from exc
-        if body.get("status") != 1:
-            raise NotificationError("Pushover 拒绝了通知请求")
-        receipt = body.get("receipt")
-        return str(receipt) if receipt else None
+            raise NotificationError("Bark 通知发送失败") from exc
+        if body.get("code") != 200:
+            _raise_safe_bark_error(int(body.get("code") or 400), body.get("message"))
+        timestamp = body.get("timestamp")
+        return str(timestamp) if timestamp is not None else None
 
 
 @dataclass(slots=True)
@@ -94,4 +119,3 @@ class ConsoleNotifier:
         if url:
             print(f"{url_title or '打开'}: {url}")
         return None
-

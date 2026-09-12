@@ -38,3 +38,11 @@ def test_rejects_fast_refresh(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="不能小于 0.5 秒"):
         load_config(path)
 
+
+def test_rejects_invalid_bark_volume(tmp_path: Path) -> None:
+    raw = _example()
+    raw["notification"]["emergency_volume"] = 11
+    path = tmp_path / "booking.json"
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="0 到 10"):
+        load_config(path)

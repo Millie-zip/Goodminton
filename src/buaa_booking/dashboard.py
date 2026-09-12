@@ -56,7 +56,7 @@ PAGE_TEMPLATE = """<!doctype html>
       <input id="end_time" name="end_time" type="time" value="{end_time}" required>
       <button type="submit">保存并确认</button>
     </form>
-    <p class="muted">验证码出现后，手机会持续提醒。你需要远程进入电脑手动点选。</p>
+    <p class="muted">验证码出现后，Bark 会响铃提醒。你需要远程进入电脑手动点选。</p>
   </section>
   <section class="card" style="margin-top:1rem">
     <h1 style="font-size:1.1rem">最近事件</h1>

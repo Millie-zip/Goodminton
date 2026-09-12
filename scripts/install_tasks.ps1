@@ -1,13 +1,25 @@
 param(
     [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
-    [string]$ConfigPath = ""
+    [string]$ConfigPath = "",
+    [string]$PythonExe = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
-$PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+    if ([string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
+        throw "No active Conda environment. Activate buaa-booking before running this script."
+    }
+    $PythonExe = Join-Path $env:CONDA_PREFIX "python.exe"
+}
+$PythonExe = [System.IO.Path]::GetFullPath($PythonExe)
 if (-not (Test-Path -LiteralPath $PythonExe)) {
-    throw "找不到虚拟环境 Python，请先运行 scripts\setup.ps1"
+    throw "Python executable not found: $PythonExe"
+}
+& $PythonExe -c "import buaa_booking" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    throw "The active Conda environment does not contain buaa_booking. Install the project before registering tasks."
 }
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
@@ -15,7 +27,7 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 }
 $ConfigPath = [System.IO.Path]::GetFullPath($ConfigPath)
 if (-not (Test-Path -LiteralPath $ConfigPath)) {
-    throw "找不到配置文件：$ConfigPath"
+    throw "Configuration file not found: $ConfigPath"
 }
 
 $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -64,9 +76,9 @@ $RunTask = New-ScheduledTask `
     -Settings $CommonSettings
 Register-ScheduledTask -TaskName "BUAA-Badminton-Run" -InputObject $RunTask -Force | Out-Null
 
-Write-Host "已注册 4 个当前用户任务："
-Write-Host "  BUAA-Badminton-Dashboard（登录 Windows 后启动）"
-Write-Host "  BUAA-Badminton-Prompt（每天 22:30）"
-Write-Host "  BUAA-Badminton-Reminder（每天 22:50）"
-Write-Host "  BUAA-Badminton-Run（每天 06:59）"
-
+Write-Host "Registered 4 scheduled tasks for the current Windows user:"
+Write-Host "  Python: $PythonExe"
+Write-Host "  BUAA-Badminton-Dashboard (at Windows logon)"
+Write-Host "  BUAA-Badminton-Prompt (daily at 22:30)"
+Write-Host "  BUAA-Badminton-Reminder (daily at 22:50)"
+Write-Host "  BUAA-Badminton-Run (daily at 06:59)"

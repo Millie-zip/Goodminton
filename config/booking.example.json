@@ -19,10 +19,13 @@
     "public_url": "https://YOUR-PC.YOUR-TAILNET.ts.net"
   },
   "notification": {
-    "provider": "pushover",
+    "provider": "bark",
+    "bark_server": "https://api.day.app",
     "remote_control_url": "https://remotedesktop.google.com/access/",
-    "emergency_retry_seconds": 30,
-    "emergency_expire_seconds": 600
+    "emergency_level": "critical",
+    "emergency_sound": "alarm",
+    "emergency_volume": 10,
+    "emergency_call": true
   },
   "browser": {
     "profile_dir": "data/browser-profile",
