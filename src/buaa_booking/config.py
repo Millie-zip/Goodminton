@@ -32,6 +32,8 @@ class NotificationConfig:
 class BrowserConfig:
     profile_dir: Path
     navigation_timeout_ms: int
+    captcha_mode: str
+    post_submit_detection_timeout_seconds: int
     manual_captcha_timeout_seconds: int
     payment_hold_seconds: int
     availability_refresh_count: int
@@ -44,7 +46,6 @@ class AppConfig:
     days_ahead: int
     open_time: str
     startup_time: str
-    dry_run: bool
     headed_browser: bool
     home_url: str
     venue_urls: dict[str, str]
@@ -114,11 +115,23 @@ def load_config(path: Path) -> AppConfig:
     if not 0 <= emergency_volume <= 10:
         raise ValueError("Bark emergency_volume 必须在 0 到 10 之间")
     navigation_timeout_ms = int(_required(browser_raw, "navigation_timeout_ms"))
+    captcha_mode = str(browser_raw.get("captcha_mode", "manual")).lower()
+    if captcha_mode not in {"manual", "auto"}:
+        raise ValueError("captcha_mode 必须是 manual 或 auto")
+    post_submit_detection_timeout = int(
+        browser_raw.get("post_submit_detection_timeout_seconds", 15)
+    )
     captcha_timeout = int(_required(browser_raw, "manual_captcha_timeout_seconds"))
     payment_hold = int(_required(browser_raw, "payment_hold_seconds"))
     refresh_count = int(_required(browser_raw, "availability_refresh_count"))
     refresh_interval = float(_required(browser_raw, "availability_refresh_interval_seconds"))
-    if min(navigation_timeout_ms, captcha_timeout, payment_hold, refresh_count) <= 0:
+    if min(
+        navigation_timeout_ms,
+        post_submit_detection_timeout,
+        captcha_timeout,
+        payment_hold,
+        refresh_count,
+    ) <= 0:
         raise ValueError("浏览器超时、保留时间和刷新次数必须大于 0")
     if refresh_interval < 0.5:
         raise ValueError("空闲状态刷新间隔不能小于 0.5 秒")
@@ -128,7 +141,6 @@ def load_config(path: Path) -> AppConfig:
         days_ahead=days_ahead,
         open_time=open_time,
         startup_time=startup_time,
-        dry_run=bool(_required(raw, "dry_run")),
         headed_browser=bool(_required(raw, "headed_browser")),
         home_url=str(_required(raw, "home_url")),
         venue_urls=venue_urls,
@@ -152,6 +164,8 @@ def load_config(path: Path) -> AppConfig:
         browser=BrowserConfig(
             profile_dir=profile_dir.resolve(),
             navigation_timeout_ms=navigation_timeout_ms,
+            captcha_mode=captcha_mode,
+            post_submit_detection_timeout_seconds=post_submit_detection_timeout,
             manual_captcha_timeout_seconds=captcha_timeout,
             payment_hold_seconds=payment_hold,
             availability_refresh_count=refresh_count,

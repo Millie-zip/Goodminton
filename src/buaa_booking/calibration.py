@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .automation import launch_persistent_browser_context
 from .config import AppConfig
 
 
@@ -32,12 +33,10 @@ async def calibrate(config: AppConfig, artifacts_dir: Path) -> Path:
     config.browser.profile_dir.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            config.browser.profile_dir,
+        context = await launch_persistent_browser_context(
+            playwright,
+            config,
             headless=False,
-            no_viewport=True,
-            locale="zh-CN",
-            timezone_id=config.timezone,
         )
         page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(config.home_url, wait_until="domcontentloaded")

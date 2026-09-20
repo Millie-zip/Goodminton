@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from .automation import run_booking
+from .captcha import LocalClickCaptchaSolver
 from .calibration import calibrate
 from .config import AppConfig, load_config
-from .dashboard import dashboard_url, serve_dashboard
-from .models import DailyPlan, PlanStatus
+from .dashboard import dashboard_url, serve_dashboard, wait_for_dashboard
+from .models import DailyPlan, PlanStatus, parse_clock
 from .notifier import BarkNotifier, ConsoleNotifier
 from .secrets import SecretStore
 from .store import StateStore
@@ -66,6 +67,12 @@ def _load_runtime(config_path: Path) -> tuple[AppConfig, StateStore, SecretStore
     return config, store, secrets, notifier
 
 
+def _build_captcha_solver(config: AppConfig) -> LocalClickCaptchaSolver | None:
+    if config.browser.captcha_mode != "auto":
+        return None
+    return LocalClickCaptchaSolver()
+
+
 def _init_config(destination: Path, force: bool) -> None:
     root = project_root()
     source = root / "config" / "booking.example.json"
@@ -79,19 +86,45 @@ def _init_config(destination: Path, force: bool) -> None:
     print(f"已创建配置：{destination}")
 
 
-def _ensure_tomorrow_plan(config: AppConfig, store: StateStore) -> DailyPlan:
-    run_date = datetime.now(config.tz).date() + timedelta(days=1)
-    existing = store.get_plan(run_date)
-    if existing:
-        return existing
-    plan = DailyPlan.for_run_date(
+def _effective_run_date_for_booking_window(now: datetime, open_time: str) -> date:
+    del open_time
+    return now.date()
+
+
+def _resolve_or_create_plan_for_booking_window(
+    config: AppConfig,
+    store: StateStore,
+    now: datetime,
+) -> DailyPlan:
+    run_date = _effective_run_date_for_booking_window(now, config.open_time)
+    expected_plan = DailyPlan.for_run_date(
         run_date,
         config.days_ahead,
         config.default_start_time,
         config.default_end_time,
     )
-    store.save_plan(plan)
-    return plan
+    existing = store.get_plan(run_date)
+    if existing is not None:
+        if (
+            existing.run_date == expected_plan.run_date
+            and existing.target_date == expected_plan.target_date
+            and existing.start_time == expected_plan.start_time
+            and existing.end_time == expected_plan.end_time
+        ):
+            return existing
+        store.save_plan(expected_plan)
+        return expected_plan
+
+    store.save_plan(expected_plan)
+    return expected_plan
+
+
+def _ensure_tomorrow_plan(config: AppConfig, store: StateStore) -> DailyPlan:
+    return _resolve_or_create_plan_for_booking_window(
+        config,
+        store,
+        datetime.now(config.tz),
+    )
 
 
 def _send_prompt(
@@ -100,13 +133,19 @@ def _send_prompt(
     secrets: SecretStore,
     notifier: Any,
     reminder: bool,
-) -> None:
+) -> bool:
     plan = _ensure_tomorrow_plan(config, store)
     if reminder and plan.status == PlanStatus.CONFIRMED:
         store.add_event("info", "reminder_skipped", "预约计划已确认，不再提醒")
-        return
+        return False
     if "YOUR-" in config.dashboard.public_url:
         raise ValueError("请先在 booking.json 中填写 dashboard.public_url")
+    if not wait_for_dashboard(config):
+        title = "手机设置页未启动"
+        message = "电脑上的预约设置页未能启动，本次没有发送失效链接。请检查电脑任务。"
+        store.add_event("error", "dashboard_unavailable", message)
+        notifier.send(title, message, silent=True)
+        return False
     title = "请确认明早是否预约" if not reminder else "预约计划尚未确认"
     message = (
         f"计划预约 {plan.target_date.isoformat()}，"
@@ -115,10 +154,11 @@ def _send_prompt(
     notifier.send(
         title,
         message,
-        url=dashboard_url(config, secrets),
+        url=dashboard_url(config, secrets, plan.run_date),
         url_title="设置预约计划",
     )
     store.add_event("info", "prompt_sent", title)
+    return True
 
 
 def _show(config: AppConfig, store: StateStore) -> None:
@@ -164,15 +204,33 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "serve":
             serve_dashboard(config, store, secrets)
         elif args.command == "prompt":
-            _send_prompt(config, store, secrets, notifier, args.reminder)
-            print("提醒已发送。")
+            sent = _send_prompt(config, store, secrets, notifier, args.reminder)
+            print("提醒已发送。" if sent else "本次未发送设置链接，请运行 show 查看记录。")
         elif args.command == "run":
-            run_date = args.run_date or datetime.now(config.tz).date()
+            run_date = args.run_date or _effective_run_date_for_booking_window(
+                datetime.now(config.tz),
+                config.open_time,
+            )
             plan = store.get_plan(run_date)
             if plan is None:
-                store.add_event("info", "no_plan", f"{run_date.isoformat()} 没有预约计划")
+                plan = _resolve_or_create_plan_for_booking_window(
+                    config,
+                    store,
+                    datetime.now(config.tz),
+                )
+            run_date = plan.run_date
+            if plan is None:
+                message = f"{run_date.isoformat()} 没有预约计划，程序已结束。"
+                store.add_event("info", "no_plan", message)
+                try:
+                    notifier.send("今日预约未执行", message, silent=True)
+                except Exception as exc:
+                    store.add_event(
+                        "warning", "notification_failed", f"今日预约未执行：{exc}"
+                    )
                 print(f"{run_date.isoformat()} 没有预约计划，程序结束。")
                 return
+            captcha_solver = _build_captcha_solver(config)
             asyncio.run(
                 run_booking(
                     config,
@@ -182,6 +240,7 @@ def main(argv: list[str] | None = None) -> None:
                     plan,
                     root / "artifacts" / run_date.isoformat(),
                     wait_for_open=not args.now,
+                    captcha_solver=captcha_solver,
                 )
             )
         elif args.command == "calibrate":

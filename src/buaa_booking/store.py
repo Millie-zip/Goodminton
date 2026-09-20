@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -132,4 +132,15 @@ class StateStore:
             )
             for row in rows
         ]
+
+    def purge_old_events(self, days: int = 3, *, now: datetime | None = None) -> int:
+        if days < 0:
+            raise ValueError("days must be >= 0")
+        cutoff = (now or datetime.now().astimezone()) - timedelta(days=days)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM events WHERE created_at <= ?",
+                (cutoff.isoformat(timespec="seconds"),),
+            )
+            return cursor.rowcount
 

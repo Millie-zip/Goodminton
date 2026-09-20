@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import html
 import secrets
+import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,47 +22,79 @@ PAGE_TEMPLATE = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#f5f1e8">
   <title>羽毛球预约设置</title>
   <style>
-    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f3f5f7; color: #182026; }
-    main { max-width: 34rem; margin: 0 auto; padding: 1.2rem; }
-    .card { background: white; border-radius: 18px; padding: 1.2rem; box-shadow: 0 8px 30px #18202612; }
-    h1 { margin: 0 0 .5rem; font-size: 1.45rem; }
-    .muted { color: #68737d; font-size: .92rem; }
-    label { display: block; margin-top: 1rem; font-weight: 650; }
-    input[type=time] { width: 100%; box-sizing: border-box; margin-top: .35rem; padding: .8rem; font-size: 1.1rem; border: 1px solid #ccd3d8; border-radius: 12px; }
-    .switch { display: flex; align-items: center; gap: .7rem; padding: .8rem 0; }
-    .switch input { width: 1.35rem; height: 1.35rem; }
-    button { width: 100%; margin-top: 1.25rem; border: 0; border-radius: 12px; padding: .9rem; background: #1769e0; color: white; font-size: 1rem; font-weight: 700; }
-    .ok { margin: 0 0 1rem; padding: .75rem; border-radius: 10px; background: #e7f7ed; color: #166534; }
-    .error { margin: 0 0 1rem; padding: .75rem; border-radius: 10px; background: #feecec; color: #991b1b; }
-    ul { padding-left: 1.2rem; }
-    @media (prefers-color-scheme: dark) { body { background:#101418;color:#edf1f4 } .card {background:#1b2228} .muted{color:#aab4bc} input[type=time]{background:#101418;color:#edf1f4;border-color:#45515a} }
+        :root { font-family: "Aptos", "Segoe UI", sans-serif; color: #20302b; background: #f5f1e8; }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top right, #dce9df 0, #f5f1e8 38rem); }
+        main { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
+        .hero { padding: .5rem .25rem 1.5rem; }
+        .eyebrow { margin: 0 0 .55rem; color: #54705f; font-size: .75rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+        h1 { margin: 0; color: #18352b; font-size: clamp(1.8rem, 7vw, 2.7rem); line-height: 1.05; letter-spacing: -.03em; }
+        .subtitle { max-width: 31rem; margin: .8rem 0 0; color: #627169; line-height: 1.6; }
+        .card { margin-top: 1rem; padding: clamp(1.15rem, 4vw, 1.7rem); border: 1px solid #d8dfd7; border-radius: 20px; background: #fffdf9; box-shadow: 0 16px 36px #31483b14; }
+        .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; margin: 1.2rem 0 1.4rem; }
+        .summary-item { min-width: 0; padding: .8rem; border-radius: 12px; background: #edf3ed; }
+        .summary-label { display: block; color: #718077; font-size: .72rem; }
+        .summary-value { display: block; margin-top: .25rem; overflow: hidden; color: #234638; font-size: .94rem; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+        .section-title { margin: 0 0 .8rem; color: #294b3c; font-size: 1rem; }
+        .switch { display: flex; align-items: center; gap: .8rem; padding: 1rem; border: 1px solid #d8dfd7; border-radius: 14px; background: #f8faf6; }
+        .switch input { width: 1.25rem; height: 1.25rem; accent-color: #2d7654; }
+        .switch label { margin: 0; color: #244536; font-weight: 750; }
+        .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin-top: 1rem; }
+        label { display: block; color: #52635a; font-size: .82rem; font-weight: 750; }
+        input[type=time] { width: 100%; margin-top: .4rem; padding: .8rem .75rem; border: 1px solid #cbd6cc; border-radius: 12px; background: #fff; color: #20302b; font: inherit; font-size: 1.1rem; }
+        input:focus-visible, button:focus-visible { outline: 3px solid #a9d2b8; outline-offset: 2px; }
+        button { width: 100%; margin-top: 1.2rem; padding: .9rem 1rem; border: 0; border-radius: 12px; background: #28694b; color: white; font: inherit; font-weight: 800; cursor: pointer; box-shadow: 0 7px 0 #1b4c36; transition: transform .12s ease, box-shadow .12s ease; }
+        button:hover { background: #215b40; }
+        button:active { transform: translateY(4px); box-shadow: 0 3px 0 #1b4c36; }
+        .hint { margin: 1rem 0 0; color: #718077; font-size: .85rem; line-height: 1.55; }
+        .ok, .error { margin: 0 0 1rem; padding: .8rem 1rem; border-radius: 12px; font-weight: 700; }
+        .ok { background: #e4f2e8; color: #21613e; }
+        .error { background: #f9e5df; color: #98402f; }
+        .events-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+        .events-heading h2 { margin: 0; color: #294b3c; font-size: 1rem; }
+        .events-heading span { color: #87928b; font-size: .75rem; }
+        ul { display: grid; gap: .65rem; margin: 1rem 0 0; padding: 0; list-style: none; }
+        li { padding: .7rem .8rem; border-left: 3px solid #9ac2a6; background: #f6f8f3; color: #637168; font-size: .85rem; line-height: 1.45; }
+        @media (max-width: 30rem) { .summary { grid-template-columns: 1fr; } .field-row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body><main>
-  <section class="card">
-    <h1>明早预约设置</h1>
-    <p class="muted">程序运行日：{run_date}<br>计划预约：{target_date}<br>场馆顺序：{venues}</p>
+    <header class="hero">
+        <p class="eyebrow">BUAA BADMINTON</p>
+        <h1>明早预约设置</h1>
+        <p class="subtitle">选好今晚的预约计划，明早由程序按时打开场馆页面。</p>
+    </header>
+    <section class="card">
+        <div class="summary">
+            <div class="summary-item"><span class="summary-label">计划日期</span><strong class="summary-value">{target_date}</strong></div>
+            <div class="summary-item"><span class="summary-label">运行日期</span><strong class="summary-value">{run_date}</strong></div>
+            <div class="summary-item"><span class="summary-label">场馆顺序</span><strong class="summary-value">{venues}</strong></div>
+        </div>
     {notice}
     <form method="post" action="/plan">
       <input type="hidden" name="token" value="{token}">
+      <input type="hidden" name="run_date" value="{run_date}">
       <div class="switch">
         <input id="enabled" name="enabled" type="checkbox" {checked}>
         <label for="enabled" style="margin:0">明早执行预约</label>
       </div>
-      <label for="start_time">开始时间</label>
-      <input id="start_time" name="start_time" type="time" value="{start_time}" required>
-      <label for="end_time">结束时间</label>
-      <input id="end_time" name="end_time" type="time" value="{end_time}" required>
+            <div class="field-row">
+                <label for="start_time">开始时间
+                    <input id="start_time" name="start_time" type="time" value="{start_time}" required>
+                </label>
+                <label for="end_time">结束时间
+                    <input id="end_time" name="end_time" type="time" value="{end_time}" required>
+                </label>
+            </div>
       <button type="submit">保存并确认</button>
     </form>
-    <p class="muted">验证码出现后，Bark 会响铃提醒。你需要远程进入电脑手动点选。</p>
+        <p class="hint">验证码出现后，Bark 会响铃提醒。你需要远程进入电脑手动点选。</p>
   </section>
   <section class="card" style="margin-top:1rem">
-    <h1 style="font-size:1.1rem">最近事件</h1>
+        <div class="events-heading"><h2>最近事件</h2><span>最多显示 10 条</span></div>
     <ul>{events}</ul>
   </section>
 </main></body></html>"""
@@ -72,8 +107,19 @@ class DashboardApp:
         self.secret_store = secret_store
         self.token = secret_store.ensure_dashboard_token()
 
-    def tomorrow_plan(self) -> DailyPlan:
-        run_date = datetime.now(self.config.tz).date() + timedelta(days=1)
+    def parse_run_date(self, value: str | None) -> date:
+        if not value:
+            raise ValueError("设置链接缺少运行日期，请使用最新通知中的链接")
+        try:
+            run_date = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("设置链接中的运行日期无效") from exc
+        today = datetime.now(self.config.tz).date()
+        if run_date not in (today, today + timedelta(days=1)):
+            raise ValueError("设置链接已过期，请使用最新通知中的链接")
+        return run_date
+
+    def plan_for_run_date(self, run_date: date) -> DailyPlan:
         existing = self.store.get_plan(run_date)
         if existing:
             return existing
@@ -96,7 +142,8 @@ class DashboardApp:
         start_time = form.get("start_time", [""])[0]
         end_time = form.get("end_time", [""])[0]
         validate_time_window(start_time, end_time)
-        current = self.tomorrow_plan()
+        run_date = self.parse_run_date(form.get("run_date", [""])[0])
+        current = self.plan_for_run_date(run_date)
         plan = replace(
             current,
             enabled="enabled" in form,
@@ -112,8 +159,8 @@ class DashboardApp:
         )
         return plan
 
-    def render(self, notice: str = "", error: bool = False) -> bytes:
-        plan = self.tomorrow_plan()
+    def render(self, run_date: date, notice: str = "", error: bool = False) -> bytes:
+        plan = self.plan_for_run_date(run_date)
         events = self.store.recent_events(10)
         event_html = "".join(
             f"<li>{html.escape(event.created_at.strftime('%m-%d %H:%M'))} "
@@ -174,12 +221,18 @@ def make_handler(app: DashboardApp) -> type[BaseHTTPRequestHandler]:
             if parsed.path != "/" or not app.authenticate(query.get("token", [""])[0]):
                 self._send_html("无权访问".encode("utf-8"), HTTPStatus.FORBIDDEN)
                 return
-            self._send_html(app.render())
+            try:
+                run_date = app.parse_run_date(query.get("run_date", [""])[0])
+            except ValueError as exc:
+                self._send_html(html.escape(str(exc)).encode("utf-8"), HTTPStatus.BAD_REQUEST)
+                return
+            self._send_html(app.render(run_date))
 
         def do_POST(self) -> None:
             if self.path != "/plan":
                 self._send_html("页面不存在".encode("utf-8"), HTTPStatus.NOT_FOUND)
                 return
+            form: dict[str, list[str]] = {}
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length > 4096:
@@ -187,14 +240,19 @@ def make_handler(app: DashboardApp) -> type[BaseHTTPRequestHandler]:
                 form = urllib.parse.parse_qs(
                     self.rfile.read(length).decode("utf-8"), keep_blank_values=True
                 )
-                app.save_form(form)
+                plan = app.save_form(form)
             except PermissionError:
                 self._send_html("无权访问".encode("utf-8"), HTTPStatus.FORBIDDEN)
                 return
             except (ValueError, UnicodeDecodeError) as exc:
-                self._send_html(app.render(str(exc), error=True), HTTPStatus.BAD_REQUEST)
+                try:
+                    run_date = app.parse_run_date(form.get("run_date", [""])[0])
+                    body = app.render(run_date, str(exc), error=True)
+                except ValueError:
+                    body = html.escape(str(exc)).encode("utf-8")
+                self._send_html(body, HTTPStatus.BAD_REQUEST)
                 return
-            self._send_html(app.render("设置已保存"))
+            self._send_html(app.render(plan.run_date, "设置已保存"))
 
     return Handler
 
@@ -211,6 +269,32 @@ def serve_dashboard(config: AppConfig, store: StateStore, secrets_store: SecretS
     server.serve_forever()
 
 
-def dashboard_url(config: AppConfig, secret_store: SecretStore) -> str:
+def dashboard_url(config: AppConfig, secret_store: SecretStore, run_date: date) -> str:
     token = secret_store.ensure_dashboard_token()
-    return f"{config.dashboard.public_url}/?{urllib.parse.urlencode({'token': token})}"
+    query = urllib.parse.urlencode({"token": token, "run_date": run_date.isoformat()})
+    return f"{config.dashboard.public_url}/?{query}"
+
+
+def wait_for_dashboard(
+    config: AppConfig,
+    *,
+    timeout_seconds: float = 20.0,
+    interval_seconds: float = 0.5,
+) -> bool:
+    host = (
+        f"[{config.dashboard.host}]"
+        if ":" in config.dashboard.host
+        else config.dashboard.host
+    )
+    health_url = f"http://{host}:{config.dashboard.port}/healthz"
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        try:
+            with urllib.request.urlopen(health_url, timeout=min(2.0, remaining)) as response:
+                if response.status == HTTPStatus.OK and response.read() == b"ok":
+                    return True
+        except (OSError, TimeoutError, urllib.error.URLError):
+            pass
+        time.sleep(min(interval_seconds, max(0.0, deadline - time.monotonic())))
+    return False

@@ -41,6 +41,9 @@ $DashboardSettings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
+    -MultipleInstances IgnoreNew `
+    -RestartCount 5 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 
 function New-BookingAction([string]$Command) {
@@ -48,9 +51,14 @@ function New-BookingAction([string]$Command) {
     return New-ScheduledTaskAction -Execute $PythonExe -Argument $Arguments -WorkingDirectory $ProjectRoot
 }
 
+$DashboardTriggers = @(
+    New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser
+    New-ScheduledTaskTrigger -Daily -At "22:29"
+    New-ScheduledTaskTrigger -Daily -At "06:58"
+)
 $DashboardTask = New-ScheduledTask `
     -Action (New-BookingAction "serve") `
-    -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $CurrentUser) `
+    -Trigger $DashboardTriggers `
     -Principal $Principal `
     -Settings $DashboardSettings
 Register-ScheduledTask -TaskName "BUAA-Badminton-Dashboard" -InputObject $DashboardTask -Force | Out-Null
@@ -75,10 +83,11 @@ $RunTask = New-ScheduledTask `
     -Principal $Principal `
     -Settings $CommonSettings
 Register-ScheduledTask -TaskName "BUAA-Badminton-Run" -InputObject $RunTask -Force | Out-Null
+Start-ScheduledTask -TaskName "BUAA-Badminton-Dashboard"
 
 Write-Host "Registered 4 scheduled tasks for the current Windows user:"
 Write-Host "  Python: $PythonExe"
-Write-Host "  BUAA-Badminton-Dashboard (at Windows logon)"
+Write-Host "  BUAA-Badminton-Dashboard (started now; also at logon, 22:29, and 06:58)"
 Write-Host "  BUAA-Badminton-Prompt (daily at 22:30)"
 Write-Host "  BUAA-Badminton-Reminder (daily at 22:50)"
 Write-Host "  BUAA-Badminton-Run (daily at 06:59)"

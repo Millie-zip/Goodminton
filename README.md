@@ -2,7 +2,7 @@
 
 这个项目在 Windows 电脑上运行，用来处理北航羽毛球场预约中可以自动完成的步骤：前一晚从 iPhone 设置是否预约和时间，第二天打开场馆 `38`、`39`，寻找符合时间的任意空场，选择同伴并提交。验证码出现后，程序通知你远程操作电脑；进入支付页后再次提醒。
 
-当前版本已经包含配置、手机设置页、系统凭据、定时入口、场地候选逻辑和通知功能。北航预约页需要校园网和登录账号，本机暂时无法确认登录后的 HTML 结构，因此 `slot_candidates` 默认留空，`dry_run` 默认开启。在页面校准完成前，程序不会点击场地或提交订单。
+当前版本已经包含配置、手机设置页、系统凭据、定时入口、场地候选逻辑和通知功能。程序只按正式预约流程运行，不再提供试运行分支。北航预约页需要校园网和登录账号，本机暂时无法确认登录后的 HTML 结构，因此 `slot_candidates` 默认留空；完成页面校准前，程序会报告配置错误，不会点击场地。
 
 程序不会自动识别图像验证码，也不会在支付超时后循环下单。
 
@@ -58,7 +58,7 @@ python -m buaa_booking setup-secrets
 
 这些内容写入 Windows 系统凭据库。配置文件和 SQLite 数据库不保存密码。
 
-普通计划提醒只显示通知；验证码、登录异常和支付提醒会使用 Bark 的紧急通知，并按当前配置持续响铃 30 秒。点通知会打开手机设置页或远程控制入口。
+计划提醒照常显示。预约启动、跳过、登录异常和运行错误使用 Bark 静默通知，不响铃；只有进入人工验证码或支付页面时才使用紧急通知，并按当前配置持续响铃 30 秒。点通知会打开手机设置页或远程控制入口。
 
 先测试手机通知：
 
@@ -143,7 +143,7 @@ https://你的电脑名.你的-tailnet.ts.net
 tailscale serve status
 ```
 
-`serve --bg` 会让 Tailscale 持续转发；设置页本身仍只在电脑本机监听。电脑重启后，要先让 Windows 登录并启动本程序的 Dashboard 定时任务，设置页才会重新出现。
+`serve --bg` 会让 Tailscale 持续转发；设置页本身仍只在电脑本机监听。安装 Windows 定时任务后，Dashboard 会立即启动，并在登录 Windows、每天 22:29 和 06:58 时自动检查启动。
 
 ### 第一次打开：在 iPhone 操作
 
@@ -163,11 +163,11 @@ tailscale serve status
    - 开始时间 / 结束时间：例如 `19:00` 和 `21:00`；
 6. 点页面最下方的“保存并确认”。看到“设置已保存”才算完成。
 
-这个页面的链接含有一次固定访问令牌。只从 Bark 通知打开，不要转发给其他人。
+这个页面的链接含有私密访问令牌和本次计划的运行日期。只从 Bark 通知打开，不要转发给其他人。即使你在零点以后才打开通知，页面也会保存到通知指定的那次早晨任务，不会错误地顺延一天；过期链接会直接提示重新使用最新通知。
 
 ### 每天晚上：iPhone 上只做这四步
 
-在电脑已经开机、联网，并且 Dashboard 已启动的前提下：
+在电脑已经开机、联网的前提下，Dashboard 会在通知发出前自动启动：
 
 1. 晚上 22:30，Bark 会收到“请确认明早是否预约”；
 2. 点通知，打开 Safari 设置页；
@@ -175,6 +175,8 @@ tailscale serve status
 4. 点“保存并确认”。
 
 没有保存确认时，默认不会运行预约。22:50 若还未确认，Bark 会再提醒一次。
+
+程序发送设置通知前会先检查电脑上的设置页。检查通过后，Bark 通知才会带可点击链接；如果设置页没有启动，手机收到的是“手机设置页未启动”，不会再打开无效页面。
 
 ### 第二天早晨：电脑自动做什么
 
@@ -184,22 +186,33 @@ tailscale serve status
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_tasks.ps1
 ```
 
-运行这条命令前，PowerShell 提示符左侧应显示 `(buaa-booking)`。安装脚本会记录当前 Conda 环境中 `python.exe` 的绝对路径；第二天执行计划任务时不需要重新打开或激活 Conda。
+运行这条命令前，PowerShell 提示符左侧应显示 `(buaa-booking)`。安装脚本会记录当前 Conda 环境中 `python.exe` 的绝对路径，并立即启动 Dashboard；第二天执行计划任务时不需要重新打开或激活 Conda。
 
 之后不需要在 iPhone 上启动脚本。只要电脑在 06:59 前已经开机、没有休眠、能访问校园网或学校 VPN，Windows 会在 06:59 启动浏览器并预载页面，07:00 开始读取场地。
 
-如果出现验证码或进入支付页，Bark 会响铃。此时再用 iPhone 的 Chrome Remote Desktop 或 RustDesk 连到电脑，手动完成验证码或付款。
+早晨任务每次运行都会发一条静默状态通知：计划未启用会提示“今日预约未执行”；已启用会先提示“预约程序已启动”；配置未完成、没有空场或发生错误时，会说明最后执行到的步骤和停止原因。详细步骤同时写入本地事件日志，避免发送通知拖慢抢场。
 
-目前 `dry_run` 仍是 `true`：即使你点击“保存并确认”，程序也只检测场地，不会提交预约。完成页面校准并确认无误后，才把它改为 `false`。
+正式提交后，程序会等待最多 15 秒识别页面变化，并同时检查主页面和嵌入页面。自动模式会监听 `captcha/get` 的 JSON 响应，读取 `data.originalImageBase64`（兼容顶层字段），用本地 OCR 识别 clickWord 图片并点击页面中的验证码图片；无法确认或求解失败时回退人工处理。进入支付页时程序停止，不会自动付款。若 15 秒后仍无法判断，程序会停止，避免重复提交，并在当天的 `artifacts` 目录保存提交前、提交后或状态未知时的截图。
+
+程序目前只保留正式预约路径。只要计划已启用且选择器配置完整，就会选择场地、同伴、勾选须知并提交。
 
 ## 手机远程点验证码
 
-验证码不能由程序自动识别。建议二选一：
+`config/booking.json` 中的 `browser.captcha_mode` 支持两个值：
+
+- `manual`：默认模式。检测到验证码后紧急提醒，由你远程操作电脑完成。
+- `auto`：监听 `captcha/get` 的 `application/json` 响应，提取 `originalImageBase64`，由本地 OCR 识别并点击 clickWord 验证码；接口数据不完整、图片无法识别或结果无法确认时自动回退到 `manual`。
+
+当前实际配置仍为 `manual`。人工处理可选择下面任一方式：
 
 - Chrome Remote Desktop：电脑开启远程访问，iPhone 安装客户端；默认配置点击 Bark 通知后打开它的访问页。
 - RustDesk：电脑和 iPhone 都安装客户端，设置无人值守密码；收到 Bark 通知后手动打开 RustDesk 连接电脑。
 
 两种方式都可免费使用。若采用 RustDesk，可把 `config/booking.json` 中的 `notification.remote_control_url` 改成你希望通知点击后打开的入口；如果 iOS 不能直接拉起 RustDesk，收到提醒后手动打开即可。
+
+自动接口定义在 `src/buaa_booking/captcha.py`。`LocalClickCaptchaSolver` 接收提交后捕获的验证码响应和解码后的图片，并在确认点击流程完成后返回 `True`；异常会转换为 `AutoCaptchaUnavailable`，预约流程随后回退到人工处理。
+
+本地测试求解器默认 `save_debug_artifacts=False`，验证码图片、OCR 结果和失败截图只保留在内存中，不写入磁盘。显式开启调试保留后，每次处理会创建独立的 `captcha-attempt-*` 子目录，文件权限会尽量限制为当前用户可读写，默认保留 3600 秒，并在下一次创建调试目录时清理过期内容。不要把包含验证码调试文件的 `artifacts` 目录同步或共享到外部服务。
 
 ## 页面校准
 
@@ -229,13 +242,7 @@ python -m buaa_booking calibrate
 
 这里的示例不代表北航页面的真实选择器。必须以校准结果为准。
 
-## 试运行
-
-保持：
-
-```json
-"dry_run": true
-```
+## 正式运行前检查
 
 先发送当晚设置提醒，在手机上保存明早计划：
 
@@ -258,7 +265,7 @@ python -m buaa_booking show
 python -m buaa_booking run --run-date 2026-09-11 --now
 ```
 
-试运行只读取候选场地并保存截图，不点击场地。确认日期、时间和候选场地都正确后，才能把 `dry_run` 改成 `false`。
+`run` 命令现在会执行正式预约。当前 `selectors.slot_candidates` 仍为空时，程序只会静默报告“预约配置未完成”；必须先完成页面校准并填写真实选择器。
 
 ## 安装 Windows 定时任务
 
@@ -272,7 +279,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_tasks.
 
 | 任务 | 时间 | 用途 |
 |---|---:|---|
-| `BUAA-Badminton-Dashboard` | 登录后 | 启动手机设置页 |
+| `BUAA-Badminton-Dashboard` | 安装后立即启动；登录后、22:29、06:58 自动补启动 | 保证手机设置页在通知发出前可访问 |
 | `BUAA-Badminton-Prompt` | 22:30 | 询问明早是否预约 |
 | `BUAA-Badminton-Reminder` | 22:50 | 未确认时再次提醒 |
 | `BUAA-Badminton-Run` | 06:59 | 登录、预载页面并等待 07:00 |
@@ -286,7 +293,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_tasks.
 - `running`：正在登录或读取场地
 - `captcha`：等待你远程点选验证码
 - `payment`：已经进入支付页
-- `dry_run`：试运行结束，没有点击
 - `skipped`：当天没有启用预约
 - `failed`：页面结构、网络或登录状态不符合预期，程序停止
 
@@ -294,12 +300,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install_tasks.
 
 ## 测试
 
+连接校园网或学校 VPN 后，先执行不提交订单的页面校准：
+
 ```powershell
 (conda shell.powershell activate "D:\Millie\conda\envs\buaa-booking") | Out-String | Invoke-Expression
-python -m pytest
+python tests/test_full_flow.py --calibrate
 ```
 
-单元测试不访问北航网站，也不会发送真实预约请求。
+需要真实提交测试时运行：
+
+```powershell
+python tests/test_full_flow.py --allow-submit --start-time 20:00 --end-time 21:00
+```
+
+测试会连接北航真实网页，预约运行日后第 2 天，并使用单独的 `data/live-test-state.sqlite3`，不会改写正式定时任务的计划。程序会自动提交统一身份认证并验证登录状态，然后打开两个场馆、选择日期和空场、选择第一位可用同伴并勾选须知。点击提交前，必须在控制台输入“确认提交”；提交后由本地 OCR 自动识别并点击验证码，失败时停止，不回退人工处理。检测到支付页后程序不会付款，检查完页面后按 Enter 关闭浏览器。
 
 ## 目录
 

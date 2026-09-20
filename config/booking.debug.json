@@ -1,0 +1,65 @@
+{
+  "timezone": "Asia/Shanghai",
+  "days_ahead": 2,
+  "open_time": "07:00:00",
+  "startup_time": "06:59:00",
+  "headed_browser": true,
+  "home_url": "https://cgyy.buaa.edu.cn/venue/home",
+  "venue_urls": {
+    "38": "https://cgyy.buaa.edu.cn/venue/venue-reservation/38",
+    "39": "https://cgyy.buaa.edu.cn/venue/venue-reservation/39"
+  },
+  "venue_priority": ["38", "39"],
+  "default_start_time": "07:00",
+  "default_end_time": "08:00",
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8876,
+    "public_url": "http://127.0.0.1:8876"
+  },
+  "notification": {
+    "provider": "console",
+    "bark_server": "https://api.day.app",
+    "remote_control_url": "",
+    "emergency_level": "critical",
+    "emergency_sound": "tip",
+    "emergency_volume": 0,
+    "emergency_call": false
+  },
+  "browser": {
+    "profile_dir": "data/debug-browser-profile",
+    "navigation_timeout_ms": 30000,
+    "captcha_mode": "auto",
+    "post_submit_detection_timeout_seconds": 15,
+    "manual_captcha_timeout_seconds": 60,
+    "payment_hold_seconds": 60,
+    "availability_refresh_count": 1,
+    "availability_refresh_interval_seconds": 1.0
+  },
+  "selectors": {
+    "logged_in_markers": ["text=个人中心", "text=退出登录", "text=我的预约"],
+    "login_username": ["input[name='username']", "input[name='userName']", "input[placeholder*='学号']"],
+    "login_password": ["input[type='password']"],
+    "login_submit": ["button:has-text('登录')", "input[type='submit']"],
+    "date_buttons": ["button", "[role='tab']", ".date-item"],
+    "slot_candidates": [],
+    "companion_open": ["text=选择同伴", "text=同行人员", "text=同伴"],
+    "companion_options": [".buddy-row:not(.addBtn)", "[class*='buddy-row']:not(.addBtn)", "[role='option']", ".companion-item", ".user-item"],
+    "agreement_checkbox": ["label:has-text('已阅读') input[type='checkbox']", "input[type='checkbox'][name*='agree']", "[role='checkbox'][aria-label*='阅读']"],
+    "submit_button": [
+      ".submit_order_box .btn:has-text('提交')",
+      ".action .btn:has-text('提交')",
+      ".btn:has-text('提交')",
+      "div.btn:has-text('提交')",
+      "button:has-text('提交')",
+      "button:has-text('预约')",
+      ".submit_order_box .btn:has-text('预约')",
+      ".action .btn:has-text('预约')",
+      "div:has-text('提交')",
+      "div:has-text('预约')"
+    ],
+    "captcha_markers": ["text=验证码", "text=请依次点击", "text=安全验证"],
+    "payment_markers": ["text=支付", "text=待支付", "text=订单支付"],
+    "occupied_markers": ["text=已被预约", "text=已占用", "text=已锁定", "text=不可预约"]
+  }
+}

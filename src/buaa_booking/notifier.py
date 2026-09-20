@@ -41,16 +41,21 @@ class BarkNotifier:
         message: str,
         *,
         emergency: bool = False,
+        silent: bool = False,
         url: str | None = None,
         url_title: str | None = None,
     ) -> dict[str, str | int]:
+        if emergency and silent:
+            raise ValueError("通知不能同时设置为紧急和静默")
         payload: dict[str, str | int] = {
             "device_key": self.secrets.get("bark_device_key", required=True) or "",
             "title": title,
             "body": message,
             "group": "北航羽毛球预约",
         }
-        if emergency:
+        if silent:
+            payload["level"] = "passive"
+        elif emergency:
             payload["level"] = self.config.emergency_level
             payload["sound"] = self.config.emergency_sound
             payload["volume"] = self.config.emergency_volume
@@ -66,6 +71,7 @@ class BarkNotifier:
         message: str,
         *,
         emergency: bool = False,
+        silent: bool = False,
         url: str | None = None,
         url_title: str | None = None,
     ) -> str | None:
@@ -73,6 +79,7 @@ class BarkNotifier:
             title,
             message,
             emergency=emergency,
+            silent=silent,
             url=url,
             url_title=url_title,
         )
@@ -111,10 +118,11 @@ class ConsoleNotifier:
         message: str,
         *,
         emergency: bool = False,
+        silent: bool = False,
         url: str | None = None,
         url_title: str | None = None,
     ) -> str | None:
-        level = "紧急" if emergency else "通知"
+        level = "紧急" if emergency else "静默通知" if silent else "通知"
         print(f"[{level}] {title}: {message}")
         if url:
             print(f"{url_title or '打开'}: {url}")
