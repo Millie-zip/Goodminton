@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
@@ -32,6 +33,9 @@ class CaptchaChallenge:
     artifacts_dir: Path
     image_bytes: bytes | None = None
     response_payload: Any = None
+    token: str | None = None
+    secret_key: str | None = None
+    word_list: list[str] | None = None
 
 
 class AutoCaptchaSolver(Protocol):
@@ -110,6 +114,9 @@ class LocalClickCaptchaSolver:
                 artifacts_dir=debug_dir,
                 image_bytes=challenge.image_bytes,
                 response_payload=challenge.response_payload,
+                token=challenge.token,
+                secret_key=challenge.secret_key,
+                word_list=challenge.word_list,
             )
             if debug_dir is not None
             else None
@@ -171,6 +178,7 @@ class LocalClickCaptchaSolver:
             for char in chars
             if self._is_valid_ocr_position(char, image_width, image_height)
         ]
+        chars = chars[:-4]
 
         debug_data = {
             "prompt": prompt_text,
@@ -368,7 +376,7 @@ class LocalClickCaptchaSolver:
                 if not isinstance(item, (tuple, list)) or len(item) < 3:
                     raise TypeError("OCR item must contain box, text and score")
                 box = item[0]
-                text = str(item[1]).strip()
+                text = unicodedata.normalize("NFKC", str(item[1])).strip()
                 score = float(item[2])
                 if not math.isfinite(score):
                     raise ValueError("OCR score is not finite")
@@ -499,6 +507,14 @@ class LocalClickCaptchaSolver:
     # 查找字符
     # =====================================================
 
+    @staticmethod
+    def _normalize_ocr_char(value: str) -> str:
+        if not isinstance(value, str):
+            return ""
+        return "".join(
+            ch for ch in unicodedata.normalize("NFKC", value).strip() if not ch.isspace()
+        )
+
     def _find_best_char(
         self,
         target: str,
@@ -507,13 +523,15 @@ class LocalClickCaptchaSolver:
     ) -> tuple[int, OCRChar] | None:
 
         candidates = []
+        normalized_target = self._normalize_ocr_char(target)
 
         for index, char in enumerate(chars):
 
             if index in used_indices:
                 continue
 
-            if char.char != target:
+            normalized_char = self._normalize_ocr_char(char.char)
+            if normalized_char != normalized_target:
                 continue
 
             candidates.append(
@@ -606,16 +624,61 @@ class LocalClickCaptchaSolver:
             return False
 
     async def _find_image_locator(self, page: Any) -> Any:
-        selectors = (self.image_selector, "canvas", "img[src*='captcha']", "[class*='captcha'] img")
-        for selector in selectors:
-            locator = page.locator(selector)
-            for index in range(min(await locator.count(), 10)):
-                candidate = locator.nth(index)
+        """Locate the AJ-Captcha image container, including iframe and CSS backgrounds."""
+        selectors = (
+            self.image_selector,
+            ".verify-img-panel",
+            ".verify-img-panel canvas",
+            ".verify-img-panel img",
+            "canvas",
+            "img[src*='captcha']",
+            "img[src^='data:image']",
+            "[class*='captcha'] img",
+            "[class*='verify'] img",
+            "[style*='background-image']",
+        )
+        scopes = [page]
+        main_frame = getattr(page, "main_frame", None)
+        for frame in getattr(page, "frames", []):
+            if frame is not main_frame:
+                scopes.append(frame)
+
+        fallback_candidates: list[tuple[float, Any]] = []
+        for scope in scopes:
+            for selector_index, selector in enumerate(selectors):
                 try:
-                    if await candidate.is_visible() and self._is_valid_element_box(await candidate.bounding_box()):
-                        return candidate
+                    locator = scope.locator(selector)
+                    count = min(await locator.count(), 20)
                 except Exception:
                     continue
+                for index in range(count):
+                    candidate = locator.nth(index)
+                    try:
+                        if not await candidate.is_visible():
+                            continue
+                        box = await candidate.bounding_box()
+                        if not self._is_valid_element_box(box):
+                            continue
+                        width = float(box["width"])
+                        height = float(box["height"])
+                        if width < 120 or height < 60:
+                            continue
+
+                        # Explicit selectors and AJ-Captcha's known panel are preferred.
+                        if selector_index <= 3:
+                            return candidate
+
+                        ratio = width / height
+                        if not 1.2 <= ratio <= 4.5:
+                            continue
+                        area = width * height
+                        score = area - selector_index * 1000
+                        fallback_candidates.append((score, candidate))
+                    except Exception:
+                        continue
+
+        if fallback_candidates:
+            return max(fallback_candidates, key=lambda item: item[0])[1]
         raise AutoCaptchaUnavailable("无法定位验证码图片元素")
 
     @staticmethod
@@ -626,13 +689,21 @@ class LocalClickCaptchaSolver:
         except Exception:
             pass
         payloads = [payload]
-        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-            payloads.insert(0, payload["data"])
+        if isinstance(payload, dict):
+            if isinstance(payload.get("data"), dict):
+                payloads.insert(0, payload["data"])
+            rep_data = payload.get("data", {}).get("repData") if isinstance(payload.get("data"), dict) else payload.get("repData")
+            if isinstance(rep_data, dict):
+                payloads.insert(0, rep_data)
         for item in payloads:
+            if not isinstance(item, dict):
+                continue
             for key in ("wordList", "word", "clickWord", "prompt", "tip", "message"):
-                value = item.get(key) if isinstance(item, dict) else None
+                value = item.get(key)
                 if isinstance(value, str):
                     return value
+                if isinstance(value, list) and value and all(isinstance(x, str) for x in value):
+                    return ",".join(value)
         return ""
 
     @staticmethod
@@ -642,12 +713,21 @@ class LocalClickCaptchaSolver:
         candidates = [payload]
         if isinstance(payload.get("data"), dict):
             candidates.insert(0, payload["data"])
+            rep_data = payload["data"].get("repData")
+            if isinstance(rep_data, dict):
+                candidates.insert(0, rep_data)
+        rep_data = payload.get("repData")
+        if isinstance(rep_data, dict):
+            candidates.insert(0, rep_data)
         for item in candidates:
+            if not isinstance(item, dict):
+                continue
             for key in ("wordList", "words", "clickWords", "targetWords"):
                 value = item.get(key)
                 if isinstance(value, list) and all(isinstance(x, str) and x for x in value):
                     return [x for x in value if len(x) == 1]
         return []
+
     # =====================================================
     # 工具函数
     # =====================================================
@@ -719,23 +799,76 @@ class LocalClickCaptchaSolver:
         self._write_private_text(path, content)
 
 
+def _extract_repdata(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    candidates: list[Any] = [payload]
+    if isinstance(payload.get("data"), dict):
+        candidates.append(payload["data"])
+        rep_data = payload["data"].get("repData")
+        if isinstance(rep_data, dict):
+            candidates.append(rep_data)
+    if isinstance(payload.get("repData"), dict):
+        candidates.append(payload["repData"])
+    for item in candidates:
+        if isinstance(item, dict) and isinstance(item.get("repData"), dict):
+            return item["repData"]
+    return {}
+
+
+def extract_clickword_fields(payload: Any) -> dict[str, Any]:
+    rep_data = _extract_repdata(payload)
+    word_list: list[str] = []
+    if isinstance(rep_data.get("wordList"), list):
+        word_list = [value for value in rep_data["wordList"] if isinstance(value, str)]
+    token = rep_data.get("token") if isinstance(rep_data.get("token"), str) else None
+    secret_key = rep_data.get("secretKey") if isinstance(rep_data.get("secretKey"), str) else None
+    original_image = rep_data.get("originalImageBase64") if isinstance(rep_data.get("originalImageBase64"), str) else None
+    if original_image is None and isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            original_image = data.get("originalImageBase64") if isinstance(data.get("originalImageBase64"), str) else None
+    return {
+        "original_image_base64": original_image,
+        "word_list": word_list,
+        "token": token,
+        "secret_key": secret_key,
+        "rep_data": rep_data,
+    }
+
+
 def decode_clickword_response(payload: Any) -> bytes:
     """Extract and decode AJ-Captcha clickWord's originalImageBase64 field."""
+    rep_data = _extract_repdata(payload)
     candidates = [payload]
-    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-        candidates.insert(0, payload["data"])
-    value = None
-    for item in candidates:
-        if isinstance(item, dict) and isinstance(item.get("originalImageBase64"), str):
-            value = item["originalImageBase64"]
-            break
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), dict):
+            candidates.insert(0, payload["data"])
+        if rep_data:
+            candidates.insert(0, rep_data)
+    value = extract_clickword_fields(payload).get("original_image_base64")
+    if value is None:
+        for item in candidates:
+            if isinstance(item, dict):
+                candidate = item.get("originalImageBase64")
+                if isinstance(candidate, str):
+                    value = candidate
+                    break
+                if isinstance(item.get("repData"), dict):
+                    candidate = item["repData"].get("originalImageBase64")
+                    if isinstance(candidate, str):
+                        value = candidate
+                        break
     if not value:
         raise AutoCaptchaUnavailable("captcha/get 响应缺少 originalImageBase64")
     encoded = value.split(",", 1)[-1].strip()
     try:
         image_bytes = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise AutoCaptchaUnavailable("originalImageBase64 不是有效的 Base64") from exc
+        try:
+            image_bytes = base64.b64decode(value.strip(), validate=True)
+        except (binascii.Error, ValueError):
+            raise AutoCaptchaUnavailable("originalImageBase64 不是有效的 Base64") from exc
     if not image_bytes:
         raise AutoCaptchaUnavailable("originalImageBase64 解码后为空")
     return image_bytes

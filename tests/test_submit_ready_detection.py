@@ -200,6 +200,39 @@ def test_real_buaa_companion_markup_uses_buddy_rows():
     assert any("addBtn" in selector for selector in config.selectors["companion_options"])
 
 
+def test_real_clickword_repdata_fields_are_parsed():
+    from buaa_booking.captcha import LocalClickCaptchaSolver, decode_clickword_response, extract_clickword_fields
+
+    payload = {
+        "data": {
+            "repData": {
+                "originalImageBase64": "data:image/png;base64," + base64.b64encode(b"repdata-captcha").decode(),
+                "wordList": ["沙", "于", "算"],
+                "token": "abc-token",
+                "secretKey": "abc-secret",
+            }
+        }
+    }
+
+    fields = extract_clickword_fields(payload)
+    assert decode_clickword_response(payload) == b"repdata-captcha"
+    assert LocalClickCaptchaSolver._targets_from_payload(payload) == ["沙", "于", "算"]
+    assert fields["word_list"] == ["沙", "于", "算"]
+    assert fields["token"] == "abc-token"
+    assert fields["secret_key"] == "abc-secret"
+
+
+def test_find_best_char_accepts_whitespace_and_normalized_matches():
+    from buaa_booking.captcha import LocalClickCaptchaSolver, OCRChar
+
+    solver = LocalClickCaptchaSolver.__new__(LocalClickCaptchaSolver)
+    chars = [
+        OCRChar(char="沙 ", x=10.0, y=12.0, score=0.92),
+        OCRChar(char="算", x=40.0, y=12.0, score=0.88),
+    ]
+    assert solver._find_best_char("沙", chars, set()) == (0, chars[0])
+
+
 def test_login_falls_back_to_identity_auth_entrypoint():
     automation = BookingAutomation.__new__(BookingAutomation)
     automation.config = load_config(PROJECT_ROOT / "config" / "booking.json")

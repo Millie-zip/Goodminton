@@ -13,6 +13,7 @@ from .captcha import (
     CaptchaChallenge,
     decode_clickword_response,
     EmptyAutoCaptchaSolver,
+    extract_clickword_fields,
 )
 from .config import AppConfig
 from .models import DailyPlan, PlanStatus, SlotCandidate, parse_clock
@@ -159,6 +160,9 @@ class BookingAutomation:
         self.captcha_solver = captcha_solver or EmptyAutoCaptchaSolver()
         self._captcha_response_payload: Any = None
         self._captcha_image_bytes: bytes | None = None
+        self._captcha_word_list: list[str] | None = None
+        self._captcha_token: str | None = None
+        self._captcha_secret_key: str | None = None
         self._post_submit_monitor: dict[str, Any] | None = None
         self.current_stage = "初始化"
         self._active_page: Any | None = None
@@ -1106,6 +1110,9 @@ class BookingAutomation:
             artifacts_dir=self.artifacts_dir,
             image_bytes=self._captcha_image_bytes,
             response_payload=self._captcha_response_payload,
+            token=self._captcha_token,
+            secret_key=self._captcha_secret_key,
+            word_list=self._captcha_word_list,
         )
         try:
             solved = await self.captcha_solver.solve(challenge)
@@ -1262,9 +1269,16 @@ class BookingAutomation:
             if "application/json" not in content_type:
                 return
             payload = await response.json()
+            fields = extract_clickword_fields(payload)
             image_bytes = decode_clickword_response(payload)
             self._captcha_response_payload = payload
             self._captcha_image_bytes = image_bytes
+            current_word_list = getattr(self, "_captcha_word_list", None)
+            current_token = getattr(self, "_captcha_token", None)
+            current_secret_key = getattr(self, "_captcha_secret_key", None)
+            self._captcha_word_list = fields.get("word_list") or current_word_list
+            self._captcha_token = fields.get("token") or current_token
+            self._captcha_secret_key = fields.get("secret_key") or current_secret_key
 
         def on_response(response: Any) -> None:
             try:
