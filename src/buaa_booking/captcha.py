@@ -16,8 +16,6 @@ from io import BytesIO
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse
-
 from .models import DailyPlan, SlotCandidate
 
 
@@ -522,27 +520,13 @@ class LocalClickCaptchaSolver:
         used_indices: set[int],
     ) -> tuple[int, OCRChar] | None:
 
-        candidates = []
         normalized_target = self._normalize_ocr_char(target)
-
-        for index, char in enumerate(chars):
-
-            if index in used_indices:
-                continue
-
-            normalized_char = self._normalize_ocr_char(char.char)
-            if normalized_char != normalized_target:
-                continue
-
-            candidates.append(
-                (
-                    index,
-                    char,
-                )
-            )
-
-        if not candidates:
-            return None
+        matches = (
+            (index, char)
+            for index, char in enumerate(chars)
+            if index not in used_indices
+            and self._normalize_ocr_char(char.char) == normalized_target
+        )
 
         # 同一个字符出现多次时，
         # 暂时选OCR置信度最高的。
@@ -554,10 +538,7 @@ class LocalClickCaptchaSolver:
         # + prompt matching
         #
         # 的联合打分。
-        return max(
-            candidates,
-            key=lambda x: x[1].score,
-        )
+        return max(matches, key=lambda item: item[1].score, default=None)
 
     @staticmethod
     def _is_valid_ocr_position(
@@ -624,7 +605,7 @@ class LocalClickCaptchaSolver:
             return False
 
     async def _find_image_locator(self, page: Any) -> Any:
-        """Locate the AJ-Captcha image container, including iframe and CSS backgrounds."""
+        """查找 AJ-Captcha 图片，兼容 iframe 和 CSS 背景图。"""
         selectors = (
             self.image_selector,
             ".verify-img-panel",
@@ -664,7 +645,7 @@ class LocalClickCaptchaSolver:
                         if width < 120 or height < 60:
                             continue
 
-                        # Explicit selectors and AJ-Captcha's known panel are preferred.
+                        # 配置选择器和 AJ-Captcha 面板优先。
                         if selector_index <= 3:
                             return candidate
 

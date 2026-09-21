@@ -5,8 +5,6 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
 from .automation import launch_persistent_browser_context
 from .config import AppConfig
 

@@ -12,7 +12,7 @@ if (-not (Test-Path -LiteralPath $PythonExe)) {
 }
 
 & $PythonExe -m pip install --upgrade pip
-& $PythonExe -m pip install -e "${ProjectRoot}[test]"
+& $PythonExe -m pip install -e $ProjectRoot
 & $PythonExe -m playwright install chromium
 
 Write-Host "依赖安装完成。下一步运行："

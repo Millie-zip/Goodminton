@@ -14,7 +14,7 @@ from .captcha import LocalClickCaptchaSolver
 from .calibration import calibrate
 from .config import AppConfig, load_config
 from .dashboard import dashboard_url, serve_dashboard, wait_for_dashboard
-from .models import DailyPlan, PlanStatus, parse_clock
+from .models import DailyPlan, PlanStatus
 from .notifier import BarkNotifier, ConsoleNotifier
 from .secrets import SecretStore
 from .store import StateStore

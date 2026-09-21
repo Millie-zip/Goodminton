@@ -340,40 +340,37 @@ class BookingAutomation:
                 (*self.config.selectors.get("date_buttons", ()), *DATE_BUTTON_FALLBACK_SELECTORS)
             )
         )
-        deadline = (
-            asyncio.get_running_loop().time()
-            + self.config.browser.navigation_timeout_ms / 1000
-        )
-        while asyncio.get_running_loop().time() < deadline:
-            for selector in selectors:
-                locator = page.locator(selector)
-                count = min(await locator.count(), 100)
-                for index in range(count):
-                    item = locator.nth(index)
-                    try:
-                        if not await item.is_visible():
-                            continue
-                        text = _clean_text(await item.inner_text())
-                    except Exception:
+        for selector in selectors:
+            locator = page.locator(selector)
+            try:
+                texts = await locator.all_inner_texts()
+            except Exception:
+                continue
+            for index, raw_text in enumerate(texts[:100]):
+                item = locator.nth(index)
+                try:
+                    if not await item.is_visible():
                         continue
-                    if not any(label in text for label in labels):
-                        continue
-                    try:
-                        async with page.expect_response(
-                            lambda response: self._is_target_date_response(response, plan),
-                            timeout=min(5_000, self.config.browser.navigation_timeout_ms),
-                        ) as response_info:
-                            await item.click()
-                        response = await response_info.value
-                    except Exception:
-                        continue
-                    if response.status != 200:
-                        raise BookingError(
-                            f"预约日期接口返回 HTTP {response.status}：{plan.target_date.isoformat()}"
-                        )
-                    await page.wait_for_timeout(300)
-                    return
-            await page.wait_for_timeout(250)
+                    text = _clean_text(raw_text)
+                except Exception:
+                    continue
+                if not any(label in text for label in labels):
+                    continue
+                try:
+                    async with page.expect_response(
+                        lambda response: self._is_target_date_response(response, plan),
+                        timeout=min(2_000, self.config.browser.navigation_timeout_ms),
+                    ) as response_info:
+                        await item.click()
+                    response = await response_info.value
+                except Exception:
+                    continue
+                if response.status != 200:
+                    raise BookingError(
+                        f"预约日期接口返回 HTTP {response.status}：{plan.target_date.isoformat()}"
+                    )
+                await page.wait_for_timeout(50)
+                return
         raise CalibrationRequired(
             f"没有找到预约日期 {plan.target_date.isoformat()}，需要校 date_buttons"
         )
@@ -951,9 +948,7 @@ class BookingAutomation:
         if "同伴不能小于1人" in body_text:
             return False
 
-        # Real BUAA behavior: the selected companion is represented by the literal class value
-        # "buddy-row active" (or "buddy-row is-active") as a space-separated class list.
-        # We check the actual class attribute instead of assuming a dotted CSS selector.
+        # 北航页面用 buddy-row active/is-active 表示已选同伴。
         for selector in (".buddy-row",):
             try:
                 locator = page.locator(selector)
@@ -1089,8 +1084,9 @@ class BookingAutomation:
             + self.config.browser.manual_captcha_timeout_seconds
         )
         while asyncio.get_running_loop().time() < deadline:
-            if await self._is_payment_page(page):
-                await self._on_payment(page, plan, slot)
+            payment_page = await self._find_payment_page(page)
+            if payment_page is not None:
+                await self._on_payment(payment_page, plan, slot)
                 return
             await asyncio.sleep(1)
         raise BookingError("等待人工验证码超时")
@@ -1136,6 +1132,10 @@ class BookingAutomation:
             return
 
         if not solved:
+            payment_page = await self._find_payment_page(page)
+            if payment_page is not None:
+                await self._on_payment(payment_page, plan, slot)
+                return
             self.store.add_event(
                 "warning", "captcha_auto_failed", "自动求解器未完成验证码"
             )
@@ -1148,20 +1148,39 @@ class BookingAutomation:
             + self.config.browser.post_submit_detection_timeout_seconds
         )
         while asyncio.get_running_loop().time() < deadline:
-            if await self._is_payment_page(page):
-                await self._on_payment(page, plan, slot)
+            payment_page = await self._find_payment_page(page)
+            if payment_page is not None:
+                await self._on_payment(payment_page, plan, slot)
                 return
             await asyncio.sleep(0.25)
+        payment_page = await self._find_payment_page(page)
+        if payment_page is not None:
+            await self._on_payment(payment_page, plan, slot)
+            return
         self.store.add_event(
             "warning", "captcha_auto_unconfirmed", "无法确认自动验证码结果，改为人工处理"
         )
         await self._wait_for_manual_captcha(page, plan, slot)
 
+    async def _find_payment_page(self, page: Any) -> Any | None:
+        pages = [page]
+        try:
+            pages.extend(item for item in page.context.pages if item not in pages)
+        except Exception:
+            pass
+        for candidate in pages:
+            try:
+                if await self._any_visible_across_frames(candidate, "payment_markers"):
+                    return candidate
+                url = candidate.url.lower()
+                if "payment" in url or re.search(r"(^|[/_-])pay([/?#_-]|$)", url):
+                    return candidate
+            except Exception:
+                continue
+        return None
+
     async def _is_payment_page(self, page: Any) -> bool:
-        if await self._any_visible_across_frames(page, "payment_markers"):
-            return True
-        url = page.url.lower()
-        return "payment" in url or re.search(r"(^|[/_-])pay([/?#_-]|$)", url) is not None
+        return await self._find_payment_page(page) is not None
 
     async def _on_payment(self, page: Any, plan: DailyPlan, slot: SlotCandidate) -> None:
         self.store.update_status(plan.run_date, PlanStatus.PAYMENT)

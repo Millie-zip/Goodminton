@@ -1,6 +1,6 @@
 try:
     from .cli import main
-except ImportError:  # pragma: no cover - direct script execution fallback
+except ImportError:  # 兼容直接执行脚本。
     import sys
     from pathlib import Path
 
@@ -10,4 +10,3 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 if __name__ == "__main__":
     main()
-
