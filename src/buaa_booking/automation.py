@@ -62,6 +62,39 @@ COMPANION_CANDIDATE_SELECTORS = (
     "span",
 )
 
+PAYMENT_BUTTON_FALLBACK_SELECTORS = (
+    "div.btn:not(.cancel):has-text('支付（')",
+    "div.btn:not(.cancel):has-text('支付(')",
+    "div.btn:not(.cancel):has-text('支付')",
+    "button:has-text('支付（')",
+    "button:has-text('支付(')",
+    "[role='button']:has-text('支付（')",
+    "[role='button']:has-text('支付(')",
+    "a:has-text('支付（')",
+    "a:has-text('支付(')",
+    "button:has-text('支付')",
+    "[role='button']:has-text('支付')",
+    "a:has-text('支付')",
+    "button:has-text('付款')",
+    "button:has-text('立即支付')",
+    "button:has-text('去支付')",
+    "a:has-text('付款')",
+    "a:has-text('立即支付')",
+    ".pay-button",
+    ".payment-button",
+)
+
+PAYMENT_QR_FALLBACK_SELECTORS = (
+    "img[src*='qr']",
+    "img[src*='QR']",
+    "canvas",
+    "[class*='qr'] img",
+    "[class*='qrcode'] img",
+    "[class*='qr-code'] img",
+    "[class*='qrcode'] canvas",
+    "[class*='qr-code'] canvas",
+)
+
 
 class BookingError(RuntimeError):
     pass
@@ -333,7 +366,7 @@ class BookingAutomation:
             pages[venue_id] = page
         return pages
 
-    async def _select_target_date(self, page: Any, plan: DailyPlan) -> None:
+    async def _select_target_date_legacy(self, page: Any, plan: DailyPlan) -> None:
         labels = tuple(_clean_text(item) for item in _date_labels(plan))
         selectors = tuple(
             dict.fromkeys(
@@ -373,6 +406,95 @@ class BookingAutomation:
                 return
         raise CalibrationRequired(
             f"没有找到预约日期 {plan.target_date.isoformat()}，需要校 date_buttons"
+        )
+
+    async def _select_target_date_legacy_dynamic(self, page: Any, plan: DailyPlan) -> None:
+        # 当前站点固定使用 .date_box > div > span 渲染日期。
+        target_month_day = (plan.target_date.month, plan.target_date.day)
+        target_label = f"{plan.target_date.month:02d}月{plan.target_date.day:02d}日"
+        cards = page.locator("div.date_box > div")
+        try:
+            card_count = await cards.count()
+        except Exception as exc:
+            raise CalibrationRequired("日期控件 .date_box 未加载") from exc
+
+        observed_dates: list[str] = []
+        for index in range(card_count):
+            card = cards.nth(index)
+            try:
+                if not await card.is_visible():
+                    continue
+                date_text = _clean_text(await card.inner_text())
+                date_match = re.search(r"(\d{1,2})\D+(\d{1,2})", date_text)
+                if date_match is None:
+                    continue
+                month_day = (int(date_match.group(1)), int(date_match.group(2)))
+                observed_dates.append(
+                    f"{month_day[0]:02d}月{month_day[1]:02d}日"
+                )
+                if month_day != target_month_day:
+                    continue
+                classes = (await card.get_attribute("class") or "").split()
+                if "active" in classes:
+                    await page.wait_for_timeout(50)
+                    return
+
+                await card.click()
+                # 以 Vue 的 active 状态作为完成信号，不依赖响应监听时序。
+                for _ in range(20):
+                    classes = (await card.get_attribute("class") or "").split()
+                    if "active" in classes:
+                        await page.wait_for_timeout(50)
+                        return
+                    await page.wait_for_timeout(25)
+            except Exception as exc:
+                raise CalibrationRequired(
+                    f"点击预约日期 {target_label} 失败"
+                ) from exc
+
+        raise CalibrationRequired(
+            f"日期控件中没有目标日期 {target_label}，实际日期：{observed_dates}"
+        )
+
+    async def _select_target_date(self, page: Any, plan: DailyPlan) -> None:
+        # 当前项目固定选择日期控件的 order: 2 块，不遍历日期卡片。
+        target_label = f"{plan.target_date.month:02d}月{plan.target_date.day:02d}日"
+        target_card = page.locator(
+            'div.date_box > div[style*="order: 2"]'
+        ).first
+        try:
+            await target_card.wait_for(
+                state="visible",
+                timeout=min(self.config.browser.navigation_timeout_ms, 10_000),
+            )
+        except Exception as exc:
+            raise CalibrationRequired("日期控件 order: 2 块未完成渲染") from exc
+
+        try:
+            date_text = _clean_text(await target_card.locator("span").first.inner_text())
+            if date_text != target_label:
+                raise CalibrationRequired(
+                    f"order: 2 日期为 {date_text}，不是目标日期 {target_label}"
+                )
+            classes = (await target_card.get_attribute("class") or "").split()
+            if "active" in classes:
+                await page.wait_for_timeout(50)
+                return
+
+            await target_card.click()
+            await page.wait_for_timeout(100)
+            classes = (await target_card.get_attribute("class") or "").split()
+            if "active" in classes:
+                return
+        except CalibrationRequired:
+            raise
+        except Exception as exc:
+            raise CalibrationRequired(
+                f"点击预约日期 {target_label} 的 order: 2 块失败"
+            ) from exc
+
+        raise CalibrationRequired(
+            f"目标日期 {target_label} 的 order: 2 块点击后未激活"
         )
 
     @staticmethod
@@ -416,7 +538,7 @@ class BookingAutomation:
         if matrix_detected:
             return matrix_candidates
 
-        blocked_words = ("已约", "占用", "锁定", "不可", "售罄", "结束", "活动")
+        blocked_words = ("已售", "占用","结束", "活动")
         candidates: list[LocatedCandidate] = []
         for selector_template in self.config.selectors.get("slot_candidates", ()):
             selector = selector_template.format(
@@ -464,7 +586,7 @@ class BookingAutomation:
         }
         rows = page.locator("tr")
         row_count = min(await rows.count(), 500)
-        blocked_words = ("已约", "占用", "锁定", "不可", "售罄", "结束", "活动")
+        blocked_words = ("已售", "占用","结束", "活动")
         candidates: list[LocatedCandidate] = []
         table_detected = False
         seen: set[tuple[int, int, int, int, str]] = set()
@@ -577,7 +699,7 @@ class BookingAutomation:
                 (*self.config.selectors.get("slot_candidates", ()), *MATRIX_CELL_FALLBACK_SELECTORS)
             )
         )
-        blocked_words = ("已约", "占用", "锁定", "不可", "售罄", "结束", "活动")
+        blocked_words = ("已售", "占用","结束", "活动")
         candidates: list[LocatedCandidate] = []
         seen: set[tuple[int, int, int, int, str]] = set()
 
@@ -1183,28 +1305,94 @@ class BookingAutomation:
         return await self._find_payment_page(page) is not None
 
     async def _on_payment(self, page: Any, plan: DailyPlan, slot: SlotCandidate) -> None:
+        page = await self._find_payment_page(page) or page
+        payment_button = await self._first_visible_across_frames_with_fallback(
+            page,
+            "payment_button",
+            PAYMENT_BUTTON_FALLBACK_SELECTORS,
+        )
+        if payment_button is None:
+            raise CalibrationRequired("支付页未找到可点击的付款按钮，请校准 payment_button")
+        await payment_button.click()
+
+        qr_result = await self._wait_for_payment_qr(page)
+        if qr_result is None:
+            raise BookingError("点击付款后未找到支付二维码")
+        qr_page, qr_locator = qr_result
+        qr_path = self.artifacts_dir / "payment-qr.png"
+        await qr_locator.screenshot(path=str(qr_path))
+
+        from .dashboard import payment_qr_url
+
+        qr_url = payment_qr_url(self.config, self.secrets, plan.run_date)
         self.store.update_status(plan.run_date, PlanStatus.PAYMENT)
         self.store.add_event(
-            "info", "payment_ready", f"场馆 {slot.venue_id} 已进入支付页面"
+            "info", "payment_ready", f"场馆 {slot.venue_id} 已生成支付二维码"
         )
         self._notify(
-            "场地已抢到，请付款",
-            f"{plan.target_date.isoformat()} {plan.start_time}-{plan.end_time}，场馆 {slot.venue_id}。",
+            "场地已抢到，请打开二维码支付",
+            f"{plan.target_date.isoformat()} {plan.start_time}-{plan.end_time}，场馆 {slot.venue_id}",
             emergency=True,
-            url=self.config.notification.remote_control_url,
-            url_title="打开支付页面",
+            url=qr_url,
+            url_title="打开支付二维码",
         )
-        await self._save_screenshot(page, "payment-ready.png")
+        await self._save_screenshot(qr_page, "payment-ready.png")
         await asyncio.sleep(self.config.browser.payment_hold_seconds)
 
+    async def _wait_for_payment_qr(self, page: Any) -> tuple[Any, Any] | None:
+        deadline = asyncio.get_running_loop().time() + min(
+            self.config.browser.post_submit_detection_timeout_seconds,
+            30,
+        )
+        while asyncio.get_running_loop().time() < deadline:
+            pages = [page]
+            try:
+                pages.extend(item for item in page.context.pages if item not in pages)
+            except Exception:
+                pass
+            for candidate in pages:
+                locator = await self._first_visible_across_frames_with_fallback(
+                    candidate,
+                    "payment_qr",
+                    PAYMENT_QR_FALLBACK_SELECTORS,
+                )
+                if locator is not None:
+                    return candidate, locator
+            await asyncio.sleep(0.25)
+        return None
+
     async def _first_visible(self, page: Any, selector_group: str) -> Any | None:
-        for selector in self.config.selectors.get(selector_group, ()):
+        selectors = self.config.selectors.get(selector_group, ())
+        for selector in selectors:
             locator = page.locator(selector)
             count = min(await locator.count(), 20)
             for index in range(count):
                 item = locator.nth(index)
                 if await item.is_visible():
                     return item
+        return None
+
+    async def _first_visible_with_fallback(
+        self,
+        page: Any,
+        selector_group: str,
+        fallback: tuple[str, ...],
+        *,
+        require_enabled: bool = False,
+    ) -> Any | None:
+        selectors = self.config.selectors.get(selector_group, fallback)
+        for selector in selectors:
+            locator = page.locator(selector)
+            try:
+                count = min(await locator.count(), 20)
+                for index in range(count):
+                    item = locator.nth(index)
+                    if await item.is_visible() and (
+                        not require_enabled or await item.is_enabled()
+                    ):
+                        return item
+            except Exception:
+                continue
         return None
 
     async def _any_visible(self, page: Any, selector_group: str) -> bool:
@@ -1221,6 +1409,33 @@ class BookingAutomation:
         for scope in scopes:
             try:
                 item = await self._first_visible(scope, selector_group)
+            except Exception:
+                continue
+            if item is not None:
+                return item
+        return None
+
+    async def _first_visible_across_frames_with_fallback(
+        self,
+        page: Any,
+        selector_group: str,
+        fallback: tuple[str, ...],
+        *,
+        require_enabled: bool = False,
+    ) -> Any | None:
+        scopes = [page]
+        main_frame = getattr(page, "main_frame", None)
+        for frame in getattr(page, "frames", []):
+            if frame is not main_frame:
+                scopes.append(frame)
+        for scope in scopes:
+            try:
+                item = await self._first_visible_with_fallback(
+                    scope,
+                    selector_group,
+                    fallback,
+                    require_enabled=require_enabled,
+                )
             except Exception:
                 continue
             if item is not None:

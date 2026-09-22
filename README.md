@@ -2,7 +2,7 @@
 
 用于北航羽毛球场预约流程自动化的 Windows/Python 项目。程序可以读取预约计划，登录预约网站，选择日期和场地，选择同伴，勾选预约须知并提交订单；遇到 clickword 验证码时支持人工处理或本地 OCR 自动点击。
 
-进入支付页后，程序只更新状态、发送通知并保留页面，不会自动点击付款按钮。
+进入支付页后，程序会点击付款入口、生成支付二维码并发送到手机；不会点击最终支付确认按钮。
 
 > 重要：真实流程可能创建真实订单。首次使用请先完成校准，并确认配置中的日期、时间、场馆和账号无误。
 
@@ -219,6 +219,17 @@ $RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
 
 自动验证码不会调用第三方验证码识别服务。当前 clickword 逻辑针对图片右下角固定的“场馆预约”四个字符，在匹配目标字符前删除 OCR 结果末尾四项。如果验证码图片版式变化，需要重新检查 `src/buaa_booking/captcha.py`。
 
+## 手机端支付
+
+检测到支付页后，程序会：
+
+1. 点击配置中的付款入口；
+2. 等待当前页面或新 Tab 中的二维码；
+3. 将二维码保存为 `artifacts/<run-date>/payment-qr.png`；
+4. 通过带 Dashboard token 的 Bark 链接发送到手机。
+
+手机打开通知中的链接即可查看二维码并完成支付。程序不会点击最终支付确认按钮。付款入口和二维码选择器可在 `selectors.payment_button`、`selectors.payment_qr` 中校准。
+
 ## 真实流程测试
 
 项目保留的测试入口是 `tests/test_full_flow.py`，它连接真实网站，不是离线单元测试。
@@ -241,7 +252,7 @@ $RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
 .\.venv\Scripts\python.exe tests/test_full_flow.py --config config/booking.debug.json --calibrate
 ```
 
-真实流程可能创建订单。检测到支付页后，测试不会点击付款按钮。
+真实流程可能创建订单。检测到支付页后，测试会点击付款入口并发送二维码，但不会点击最终支付确认按钮。
 
 ## Windows 定时任务
 
@@ -315,7 +326,7 @@ docs/
 
 - 只在有权访问的账号和预约系统中使用。
 - `--allow-submit` 可能创建真实订单，运行前必须人工确认配置。
-- 程序不会自动付款。
+- 程序只点击付款入口，不会点击最终支付确认按钮。
 - 不要共享手机设置页 URL、Dashboard token、账号凭据或验证码图片。
 - 不要把 `config/booking.json`、`data/`、`artifacts/` 或浏览器 profile 提交到版本库。
 - 页面 DOM、接口字段和验证码图片版式变化后，应重新校准并检查日志。

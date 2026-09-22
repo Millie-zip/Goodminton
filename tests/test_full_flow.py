@@ -93,8 +93,8 @@ class InteractiveLiveAutomation(BookingAutomation):
 
     async def _on_payment(self, page, plan, slot) -> None:
         await super()._on_payment(page, plan, slot)
-        print("\n已检测到支付页。测试到此结束，程序不会点击付款按钮。")
-        await asyncio.to_thread(input, "检查完支付页后按 Enter 关闭测试浏览器：")
+        print("\n已点击付款入口并生成支付二维码。请在手机端完成支付。")
+        await asyncio.to_thread(input, "支付完成后按 Enter 关闭测试浏览器：")
 
     async def _on_failure(self, page, error: Exception) -> None:
         try:
@@ -232,9 +232,9 @@ async def run_live_test(args: argparse.Namespace) -> None:
     print(f"  场馆顺序：{' -> '.join(config.venue_priority)}")
     print("  登录：自动提交统一身份认证并验证登录状态")
     print("  验证码：本地 OCR 自动识别并点击，失败后停止")
-    print("  支付：进入支付页后停止，不付款")
+    print("  支付：点击付款入口并发送二维码，手机端完成支付")
 
-    captcha_solver = LocalClickCaptchaSolver(
+    captcha_solver = LocalClickCaptchaSolver(  
         image_selector=args.captcha_image_selector,
         prompt_selector=args.captcha_prompt_selector,
         success_selector=args.captcha_success_selector,

@@ -47,6 +47,8 @@
     "companion_options": [".buddy-row:not(.addBtn)", "[class*='buddy-row']:not(.addBtn)", "[role='option']", ".companion-item", ".user-item"],
     "agreement_checkbox": ["label:has-text('已阅读') input[type='checkbox']", "input[type='checkbox'][name*='agree']", "[role='checkbox'][aria-label*='阅读']"],
     "submit_button": ["button:has-text('提交')", "button:has-text('预约')"],
+    "payment_button": ["div.btn:not(.cancel):has-text('支付（')", "div.btn:not(.cancel):has-text('支付(')", "div.btn:not(.cancel):has-text('支付')", "button:has-text('支付（')", "button:has-text('支付(')", "[role='button']:has-text('支付（')", "[role='button']:has-text('支付(')", "a:has-text('支付（')", "a:has-text('支付(')", "button:has-text('支付')", "[role='button']:has-text('支付')", "a:has-text('支付')", "button:has-text('付款')", "button:has-text('立即支付')", "button:has-text('去支付')", "a:has-text('付款')"],
+    "payment_qr": ["img[src*='qr']", "canvas", "[class*='qrcode'] img", "[class*='qr-code'] img"],
     "captcha_markers": ["text=验证码", "text=请依次点击", "text=安全验证"],
     "payment_markers": ["text=支付", "text=待支付", "text=订单支付"],
     "occupied_markers": ["text=已被预约", "text=已占用", "text=已锁定", "text=不可预约"]

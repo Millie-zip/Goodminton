@@ -202,7 +202,7 @@ def main(argv: list[str] | None = None) -> None:
             secrets.interactive_setup(config.notification.provider)
             print("账号和通知密钥已保存到系统凭据库。")
         elif args.command == "serve":
-            serve_dashboard(config, store, secrets)
+            serve_dashboard(config, store, secrets, root / "artifacts")
         elif args.command == "prompt":
             sent = _send_prompt(config, store, secrets, notifier, args.reminder)
             print("提醒已发送。" if sent else "本次未发送设置链接，请运行 show 查看记录。")

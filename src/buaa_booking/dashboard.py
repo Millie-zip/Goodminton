@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from .config import AppConfig
 from .models import DailyPlan, PlanStatus, validate_time_window
@@ -101,11 +102,21 @@ PAGE_TEMPLATE = """<!doctype html>
 
 
 class DashboardApp:
-    def __init__(self, config: AppConfig, store: StateStore, secret_store: SecretStore) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        store: StateStore,
+        secret_store: SecretStore,
+        artifacts_dir: Path,
+    ) -> None:
         self.config = config
         self.store = store
         self.secret_store = secret_store
+        self.artifacts_dir = artifacts_dir.resolve()
         self.token = secret_store.ensure_dashboard_token()
+
+    def payment_qr_path(self, run_date: date) -> Path:
+        return self.artifacts_dir / run_date.isoformat() / "payment-qr.png"
 
     def parse_run_date(self, value: str | None) -> date:
         if not value:
@@ -207,6 +218,15 @@ def make_handler(app: DashboardApp) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_png(self, body: bytes) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/healthz":
@@ -218,6 +238,19 @@ def make_handler(app: DashboardApp) -> type[BaseHTTPRequestHandler]:
                 self.wfile.write(body)
                 return
             query = urllib.parse.parse_qs(parsed.query)
+            if parsed.path == "/payment-qr":
+                if not app.authenticate(query.get("token", [""])[0]):
+                    self._send_html("无权访问".encode("utf-8"), HTTPStatus.FORBIDDEN)
+                    return
+                try:
+                    run_date = app.parse_run_date(query.get("run_date", [""])[0])
+                    qr_path = app.payment_qr_path(run_date)
+                    body = qr_path.read_bytes()
+                except (ValueError, OSError):
+                    self._send_html("支付二维码尚未生成".encode("utf-8"), HTTPStatus.NOT_FOUND)
+                    return
+                self._send_png(body)
+                return
             if parsed.path != "/" or not app.authenticate(query.get("token", [""])[0]):
                 self._send_html("无权访问".encode("utf-8"), HTTPStatus.FORBIDDEN)
                 return
@@ -257,8 +290,13 @@ def make_handler(app: DashboardApp) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve_dashboard(config: AppConfig, store: StateStore, secrets_store: SecretStore) -> None:
-    app = DashboardApp(config, store, secrets_store)
+def serve_dashboard(
+    config: AppConfig,
+    store: StateStore,
+    secrets_store: SecretStore,
+    artifacts_dir: Path,
+) -> None:
+    app = DashboardApp(config, store, secrets_store, artifacts_dir)
     server = ThreadingHTTPServer(
         (config.dashboard.host, config.dashboard.port), make_handler(app)
     )
@@ -273,6 +311,12 @@ def dashboard_url(config: AppConfig, secret_store: SecretStore, run_date: date) 
     token = secret_store.ensure_dashboard_token()
     query = urllib.parse.urlencode({"token": token, "run_date": run_date.isoformat()})
     return f"{config.dashboard.public_url}/?{query}"
+
+
+def payment_qr_url(config: AppConfig, secret_store: SecretStore, run_date: date) -> str:
+    token = secret_store.ensure_dashboard_token()
+    query = urllib.parse.urlencode({"token": token, "run_date": run_date.isoformat()})
+    return f"{config.dashboard.public_url}/payment-qr?{query}"
 
 
 def wait_for_dashboard(
