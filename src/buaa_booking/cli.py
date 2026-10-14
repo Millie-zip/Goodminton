@@ -18,6 +18,7 @@ from .models import DailyPlan, PlanStatus
 from .notifier import BarkNotifier, ConsoleNotifier
 from .secrets import SecretStore
 from .store import StateStore
+from .tasks import set_reminder_enabled, sync_reminder_task
 
 
 def project_root() -> Path:
@@ -50,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("calibrate", help="采集登录后页面结构，不提交订单")
     subparsers.add_parser("show", help="显示当天和明天的计划及最近事件")
     subparsers.add_parser("test-notification", help="发送一条普通测试通知")
+    subparsers.add_parser("sync-reminder", help="按当前计划启用或停用提醒任务")
     return parser
 
 
@@ -119,12 +121,34 @@ def _resolve_or_create_plan_for_booking_window(
     return expected_plan
 
 
-def _ensure_tomorrow_plan(config: AppConfig, store: StateStore) -> DailyPlan:
-    return _resolve_or_create_plan_for_booking_window(
-        config,
-        store,
-        datetime.now(config.tz),
+def _ensure_prompt_plan(
+    config: AppConfig,
+    store: StateStore,
+    *,
+    reminder: bool,
+    now: datetime | None = None,
+) -> DailyPlan | None:
+    current = now or datetime.now(config.tz)
+    if not reminder:
+        run_date = current.date() + timedelta(days=1)
+    elif current.hour >= 22 and (current.hour > 22 or current.minute >= 30):
+        run_date = current.date() + timedelta(days=1)
+    elif current.hour < 2:
+        run_date = current.date()
+    else:
+        return None
+
+    existing = store.get_plan(run_date)
+    if existing is not None:
+        return existing
+    plan = DailyPlan.for_run_date(
+        run_date,
+        config.days_ahead,
+        config.default_start_time,
+        config.default_end_time,
     )
+    store.save_plan(plan)
+    return plan
 
 
 def _send_prompt(
@@ -134,8 +158,18 @@ def _send_prompt(
     notifier: Any,
     reminder: bool,
 ) -> bool:
-    plan = _ensure_tomorrow_plan(config, store)
+    plan = _ensure_prompt_plan(config, store, reminder=reminder)
+    if plan is None:
+        store.add_event("info", "reminder_skipped", "已超过凌晨 02:00 提醒截止时间")
+        return False
+    if not reminder:
+        set_reminder_enabled(plan.status != PlanStatus.CONFIRMED, store)
+        # 手机可能在启用任务的同时提交反馈，再读一次已保存的计划。
+        plan = store.get_plan(plan.run_date) or plan
+        if plan.status == PlanStatus.CONFIRMED:
+            set_reminder_enabled(False, store)
     if reminder and plan.status == PlanStatus.CONFIRMED:
+        set_reminder_enabled(False, store)
         store.add_event("info", "reminder_skipped", "预约计划已确认，不再提醒")
         return False
     if "YOUR-" in config.dashboard.public_url:
@@ -251,6 +285,9 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "test-notification":
             notifier.send("预约助手测试", "手机通知连接正常。")
             print("测试通知已发送。")
+        elif args.command == "sync-reminder":
+            if not sync_reminder_task(store, datetime.now(config.tz)):
+                raise RuntimeError("提醒任务状态同步失败，请运行 show 查看记录")
         else:
             parser.error(f"未知命令：{args.command}")
     except KeyboardInterrupt:

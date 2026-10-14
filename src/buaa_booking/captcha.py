@@ -176,7 +176,7 @@ class LocalClickCaptchaSolver:
             for char in chars
             if self._is_valid_ocr_position(char, image_width, image_height)
         ]
-        chars = chars[:-4]
+        chars = self._without_footer(chars, image_width, image_height)
 
         debug_data = {
             "prompt": prompt_text,
@@ -344,6 +344,14 @@ class LocalClickCaptchaSolver:
     # =====================================================
     # OCR
     # =====================================================
+
+    @staticmethod
+    def _without_footer(chars: list[OCRChar], width: int, height: int) -> list[OCRChar]:
+        # 目标站右下角的“场馆预约”水印，不保证被 OCR 完整识别成四个字，
+        # 也不保证排在结果末尾；只过滤该区域的水印字，不截断目标字符。
+        return [char for char in chars if not (
+            char.char in "场馆预约" and char.x >= width * 0.65 and char.y >= height * 0.85
+        )]
 
     def _run_ocr(
         self,

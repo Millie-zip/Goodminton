@@ -44,6 +44,7 @@ class BarkNotifier:
         silent: bool = False,
         url: str | None = None,
         url_title: str | None = None,
+        image: str | None = None,
     ) -> dict[str, str | int]:
         if emergency and silent:
             raise ValueError("通知不能同时设置为紧急和静默")
@@ -63,6 +64,8 @@ class BarkNotifier:
                 payload["call"] = "1"
         if url:
             payload["url"] = url
+        if image:
+            payload["image"] = image
         return payload
 
     def send(
@@ -74,6 +77,7 @@ class BarkNotifier:
         silent: bool = False,
         url: str | None = None,
         url_title: str | None = None,
+        image: str | None = None,
     ) -> str | None:
         payload = self.build_payload(
             title,
@@ -82,6 +86,7 @@ class BarkNotifier:
             silent=silent,
             url=url,
             url_title=url_title,
+            image=image,
         )
         endpoint = f"{self.config.bark_server.rstrip('/')}/push"
         request = urllib.request.Request(
@@ -121,9 +126,12 @@ class ConsoleNotifier:
         silent: bool = False,
         url: str | None = None,
         url_title: str | None = None,
+        image: str | None = None,
     ) -> str | None:
         level = "紧急" if emergency else "静默通知" if silent else "通知"
         print(f"[{level}] {title}: {message}")
         if url:
             print(f"{url_title or '打开'}: {url}")
+        if image:
+            print(f"Bark image: {image}")
         return None

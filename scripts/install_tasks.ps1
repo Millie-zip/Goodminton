@@ -70,12 +70,29 @@ $PromptTask = New-ScheduledTask `
     -Settings $CommonSettings
 Register-ScheduledTask -TaskName "BUAA-Badminton-Prompt" -InputObject $PromptTask -Force | Out-Null
 
+$ReminderTimes = @(
+    "22:45", "23:00", "23:15", "23:30", "23:45",
+    "00:00", "00:15", "00:30", "00:45",
+    "01:00", "01:15", "01:30", "01:45"
+)
+$ReminderTriggers = @(
+    $ReminderTimes | ForEach-Object { New-ScheduledTaskTrigger -Daily -At $_ }
+)
 $ReminderTask = New-ScheduledTask `
     -Action (New-BookingAction "prompt --reminder") `
-    -Trigger (New-ScheduledTaskTrigger -Daily -At "22:50") `
+    -Trigger $ReminderTriggers `
     -Principal $Principal `
-    -Settings $CommonSettings
+    -Settings (New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 5))
 Register-ScheduledTask -TaskName "BUAA-Badminton-Reminder" -InputObject $ReminderTask -Force | Out-Null
+& $PythonExe -m buaa_booking --config $ConfigPath sync-reminder
+if ($LASTEXITCODE -ne 0) {
+    throw "Reminder task state could not be synchronized with the saved plan."
+}
 
 $RunTask = New-ScheduledTask `
     -Action (New-BookingAction "run") `
@@ -89,5 +106,5 @@ Write-Host "Registered 4 scheduled tasks for the current Windows user:"
 Write-Host "  Python: $PythonExe"
 Write-Host "  BUAA-Badminton-Dashboard (started now; also at logon, 22:29, and 06:58)"
 Write-Host "  BUAA-Badminton-Prompt (daily at 22:30)"
-Write-Host "  BUAA-Badminton-Reminder (daily at 22:50)"
+Write-Host "  BUAA-Badminton-Reminder (22:45-01:45 every 15 minutes; disabled after phone confirmation; re-enabled by the next nightly prompt)"
 Write-Host "  BUAA-Badminton-Run (daily at 06:59)"

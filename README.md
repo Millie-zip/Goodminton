@@ -10,7 +10,7 @@
 
 - 本地手机设置页，用于确认是否运行第二天的预约计划
 - Playwright 持久化浏览器登录状态
-- 多场馆并发打开和按优先级尝试候选场地
+- 打开多个场馆页面，并按优先级尝试候选场地
 - 日期选择、场地矩阵识别和配置选择器兜底
 - 同伴选择、预约须知勾选和提交按钮状态检查
 - `captcha/get` clickword 验证码人工/本地 OCR 处理
@@ -173,10 +173,10 @@ tailscale serve status
 
 ## 正式运行
 
-立即执行两天后的计划：
+立即执行当天已保存的计划（目标预约日期由 `days_ahead` 决定）：
 
 ```powershell
-$RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
+$RunDate = (Get-Date).ToString("yyyy-MM-dd")
 .\.venv\Scripts\python.exe -m buaa_booking run --run-date $RunDate --now
 ```
 
@@ -217,42 +217,22 @@ $RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
 - `manual`：检测到验证码后通知用户，由用户远程操作浏览器；
 - `auto`：监听 `captcha/get` 的 `application/json` 响应，读取 `originalImageBase64` 和目标字符，使用本地 RapidOCR 点击验证码图片。
 
-自动验证码不会调用第三方验证码识别服务。当前 clickword 逻辑针对图片右下角固定的“场馆预约”四个字符，在匹配目标字符前删除 OCR 结果末尾四项。如果验证码图片版式变化，需要重新检查 `src/buaa_booking/captcha.py`。
+自动验证码不会调用第三方验证码识别服务。程序按位置和字符过滤图片右下角的“场馆预约”水印，不再按 OCR 结果顺序截断。自动识别仍可能失败，届时回退人工处理。
 
 ## 手机端支付
 
 检测到支付页后，程序会：
 
 1. 点击配置中的付款入口；
-2. 等待当前页面或新 Tab 中的二维码；
-3. 将二维码保存为 `artifacts/<run-date>/payment-qr.png`；
+2. 等待支付页面的 `img.payImage` 图片加载；
+3. 转换为 PNG 并检查二维码结构，确认后保存为 `artifacts/<run-date>/payment-qr.png`；
 4. 通过带 Dashboard token 的 Bark 链接发送到手机。
 
-手机打开通知中的链接即可查看二维码并完成支付。程序不会点击最终支付确认按钮。付款入口和二维码选择器可在 `selectors.payment_button`、`selectors.payment_qr` 中校准。
+手机打开通知中的链接即可查看二维码并人工完成支付。程序不会点击最终支付确认按钮，会在支付页停留并轮询 `selectors.payment_success_markers`、`selectors.payment_failure_markers`。支付成功后结束；支付失败或 60 秒超时后，程序会重新执行选择日期、场地、同伴、须知和提交订单的完整流程。付款入口可在 `selectors.payment_button` 中校准；二维码定位固定使用目标站的 `img.payImage`，防止误选验证码。
 
-## 真实流程测试
+## 版本范围
 
-项目保留的测试入口是 `tests/test_full_flow.py`，它连接真实网站，不是离线单元测试。
-
-只校准、不提交订单：
-
-```powershell
-.\.venv\Scripts\python.exe tests/test_full_flow.py --calibrate
-```
-
-确认所有参数正确后，才允许真实提交：
-
-```powershell
-.\.venv\Scripts\python.exe tests/test_full_flow.py --allow-submit --start-time 07:00 --end-time 08:00
-```
-
-可指定独立调试配置：
-
-```powershell
-.\.venv\Scripts\python.exe tests/test_full_flow.py --config config/booking.debug.json --calibrate
-```
-
-真实流程可能创建订单。检测到支付页后，测试会点击付款入口并发送二维码，但不会点击最终支付确认按钮。
+此版本只包含运行代码、配置模板和必要说明。测试脚本、调试配置、实测报告、截图和日志留在本机，不纳入版本库。手机通知及正确支付二维码已实测可打开；耗时优化仍在进行，当前版本不保证 5 秒内点击支付。
 
 ## Windows 定时任务
 
@@ -274,10 +254,10 @@ $RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
 |---|---:|---|
 | `BUAA-Badminton-Dashboard` | 登录、22:29、06:58 | 启动手机设置页 |
 | `BUAA-Badminton-Prompt` | 22:30 | 发送计划确认提醒 |
-| `BUAA-Badminton-Reminder` | 22:50 | 再次提醒未确认计划 |
+| `BUAA-Badminton-Reminder` | 22:45–01:45，每 15 分钟 | 提醒未确认计划；收到手机反馈后停用 |
 | `BUAA-Badminton-Run` | 06:59 | 启动预约流程 |
 
-具体时间以配置和脚本当前实现为准。
+下一次晚间计划提醒会按计划确认状态重新启用或停用提醒任务。具体时间以配置和脚本当前实现为准。
 
 ## 常用命令
 
@@ -297,8 +277,8 @@ $RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
 # 查看计划
 .\.venv\Scripts\python.exe -m buaa_booking show
 
-# 执行两天后的计划
-$RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
+# 执行当天已保存的预约计划
+$RunDate = (Get-Date).ToString("yyyy-MM-dd")
 .\.venv\Scripts\python.exe -m buaa_booking run --run-date $RunDate --now
 ```
 
@@ -307,15 +287,11 @@ $RunDate = (Get-Date).AddDays(2).ToString("yyyy-MM-dd")
 ```text
 config/
   booking.example.json       可提交的配置模板
-  booking.debug.json         调试配置模板
   booking.json               本机配置，不提交
 scripts/
   setup.ps1                  安装项目和 Playwright
   install_tasks.ps1          注册 Windows 定时任务
-  run_full_flow_debug.ps1   真实流程调试入口
 src/buaa_booking/            主程序代码
-tests/
-  test_full_flow.py          真实网站校准和流程测试
 data/                        浏览器状态、SQLite 数据库和运行状态
 artifacts/                   校准截图、运行截图和调试文件
 docs/
@@ -325,7 +301,7 @@ docs/
 ## 安全和运行边界
 
 - 只在有权访问的账号和预约系统中使用。
-- `--allow-submit` 可能创建真实订单，运行前必须人工确认配置。
+- `run` 会创建真实订单，运行前应确认配置和已保存的计划。
 - 程序只点击付款入口，不会点击最终支付确认按钮。
 - 不要共享手机设置页 URL、Dashboard token、账号凭据或验证码图片。
 - 不要把 `config/booking.json`、`data/`、`artifacts/` 或浏览器 profile 提交到版本库。
@@ -336,7 +312,7 @@ docs/
 修改代码后可执行：
 
 ```powershell
-.\.venv\Scripts\python.exe -m compileall -q src tests
+.\.venv\Scripts\python.exe -m compileall -q src
 git diff --check
 ```
 

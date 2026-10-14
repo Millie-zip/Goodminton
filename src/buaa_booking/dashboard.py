@@ -16,6 +16,7 @@ from .config import AppConfig
 from .models import DailyPlan, PlanStatus, validate_time_window
 from .secrets import SecretStore
 from .store import StateStore
+from .tasks import reminder_run_date, set_reminder_enabled
 
 
 PAGE_TEMPLATE = """<!doctype html>
@@ -168,6 +169,8 @@ class DashboardApp:
             "plan_confirmed",
             f"已确认 {plan.target_date.isoformat()} {plan.start_time}-{plan.end_time}，执行={plan.enabled}",
         )
+        if plan.run_date == reminder_run_date(datetime.now(self.config.tz)):
+            set_reminder_enabled(False, self.store)
         return plan
 
     def render(self, run_date: date, notice: str = "", error: bool = False) -> bytes:
