@@ -5,6 +5,7 @@ import base64
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,13 @@ class LocatedCandidate:
     page: Any
     selector: str
     locator: Any | None = None
+    selections: tuple[SlotSelection, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SlotSelection:
+    court: str
+    time_label: str
 
 
 def _clean_text(value: str) -> str:
@@ -550,56 +558,161 @@ class BookingAutomation:
             for venue_id in self.config.venue_priority
         ]
         results = await asyncio.gather(*tasks)
-        return [candidate for group in results for candidate in group]
+        # 同场地连续预约优先；同等条件下保留配置的场馆顺序。
+        return sorted(
+            (candidate for group in results for candidate in group),
+            key=lambda candidate: len({item.court for item in candidate.selections}) > 1,
+        )
+
+    @staticmethod
+    def _requested_time_slots(plan: DailyPlan) -> tuple[str, ...]:
+        start, end = parse_clock(plan.start_time), parse_clock(plan.end_time)
+        if start.minute or end.minute or start.second or end.second or end.hour - start.hour not in (1, 2):
+            raise BookingError("目前支持整点起止的一小时或连续两小时预约")
+        return tuple(f"{hour:02d}:00-{hour + 1:02d}:00" for hour in range(start.hour, end.hour))
 
     async def _collect_page_candidates(
         self, venue_id: str, page: Any, plan: DailyPlan
     ) -> list[LocatedCandidate]:
-        target = f"{plan.start_time}-{plan.end_time}"
+        periods = self._requested_time_slots(plan)
+        options = []
+        for period in periods:
+            snapshot = await self._time_column_snapshot(page, period)
+            options.append([cell for cell in snapshot if self._cell_is_available(cell)])
+        if any(not cells for cells in options):
+            return []
+
+        candidates = []
+        for cells in product(*options):
+            selections = tuple(SlotSelection(cell["court"], period) for cell, period in zip(cells, periods))
+            # 多时段使用场地号和时间重新定位，不能保存翻页前的列定位器。
+            locator = None
+            if len(cells) == 1:
+                locator = self._snapshot_cell_locator(page, cells[0])
+            candidates.append(LocatedCandidate(
+                slot=SlotCandidate(venue_id=venue_id, dom_index=cells[0]["row"],
+                    label="；".join(f"{item.court} {item.time_label}" for item in selections)),
+                page=page, selector=".spaceTable > table tr", locator=locator, selections=selections,
+            ))
+        return sorted(candidates, key=lambda candidate: len({item.court for item in candidate.selections}) > 1)
+
+    async def _show_time_column(self, page: Any, target: str) -> None:
         table = page.locator(".spaceTable > table")
-        # 当前页面每次显示五个时间列，先翻到目标时间所在的一组。
-        for _ in range(3):
+        seen = set()
+        for _ in range(6):
             headers = await table.locator("tr").first.locator("td, th").all_text_contents()
             headers = [_clean_text(text) for text in headers]
             if target in headers:
+                return
+            if tuple(headers) in seen or len(headers) < 2:
                 break
+            seen.add(tuple(headers))
             arrow_class = (
                 "ivu-icon-ios-arrow-back" if target < headers[1]
                 else "ivu-icon-ios-arrow-forward"
             )
-            await table.locator(f"tr:first-child .{arrow_class}").evaluate("element => element.click()")
-            await page.wait_for_function(
-                "old => document.querySelector('.spaceTable > table tr').textContent.replace(/\\s+/g,'') !== old.replace(/\\s+/g,'')",
-                arg="".join(headers), polling=25,
-                timeout=self.config.browser.navigation_timeout_ms,
-            )
-        else:
-            raise CalibrationRequired(f"预约表格没有显示目标时间 {target}")
+            arrow = table.locator(f"tr:first-child .{arrow_class}")
+            if not await arrow.count():
+                break
+            old_header = await table.locator("tr").first.text_content()
+            await arrow.evaluate("element => element.click()")
+            try:
+                await page.wait_for_function(
+                    "old => document.querySelector('.spaceTable > table tr').textContent !== old",
+                    arg=old_header, polling=25,
+                    timeout=self.config.browser.navigation_timeout_ms,
+                )
+            except Exception as exc:
+                raise CalibrationRequired(f"预约表格无法翻到目标时段 {target}") from exc
+        raise CalibrationRequired(f"预约表格没有显示目标时段 {target}")
 
-        snapshot = await table.evaluate(
+    async def _time_column_snapshot(self, page: Any, target: str) -> list[dict[str, Any]]:
+        await self._show_time_column(page, target)
+        return await page.locator(".spaceTable > table").evaluate(
             r"""(table, target) => {
                 const rows = [...table.querySelectorAll('tr')];
-                const text = el => el.textContent.replace(/\s+/g, '');
+                const text = el => (el?.textContent || '').replace(/\s+/g, '').replace(/：/g, ':').replace(/[—–至~]/g, '-');
                 const column = [...rows[0].querySelectorAll('td,th')].findIndex(el => text(el) === target);
-                return rows.map((row, index) => {
+                return rows.flatMap((row, index) => {
                     const cells = [...row.querySelectorAll('td,th')];
-                    return {row: index, column, court: text(cells[0]), text: cells[column]?.textContent.trim() || ''};
-                }).filter(row => /^\d+号(?:场)?$/.test(row.court));
+                    const court = text(cells[0]).replace(/号场$/, '号');
+                    if (!/^\d+号$/.test(court)) return [];
+                    let logicalColumn = 0;
+                    for (let i=0; i<cells.length; i++) {
+                        const span = cells[i].colSpan || 1;
+                        if (column >= logicalColumn && column < logicalColumn + span)
+                            return [{row:index, column:i, court, span, text:text(cells[i])}];
+                        logicalColumn += span;
+                    }
+                    return [];
+                });
             }""", target,
         )
-        candidates: list[LocatedCandidate] = []
-        for cell in snapshot:
-            if not self._is_available_slot_text(cell["text"]):
-                continue
-            if any(word in cell["text"] for word in ("已售", "占用", "结束", "活动")):
-                continue
-            candidates.append(LocatedCandidate(
-                slot=SlotCandidate(venue_id=venue_id, dom_index=cell["row"],
-                                   label=f"{cell['court']} {target} {cell['text']}"),
-                page=page, selector=".spaceTable > table tr",
-                locator=table.locator("tr").nth(cell["row"]).locator("td, th").nth(cell["column"]),
-            ))
-        return candidates
+
+    def _cell_is_available(self, cell: dict[str, Any]) -> bool:
+        return (cell["span"] == 1 and self._is_available_slot_text(cell["text"])
+                and not any(word in cell["text"] for word in ("已售", "占用", "结束", "活动")))
+
+    @staticmethod
+    def _snapshot_cell_locator(page: Any, cell: dict[str, Any]) -> Any:
+        return page.locator(".spaceTable > table tr").nth(cell["row"]).locator("td, th").nth(cell["column"])
+
+    async def _selected_slots(self, page: Any) -> set[SlotSelection]:
+        # 目标网页在尚未选场时隐藏此容器，但容器仍在 DOM 中。
+        texts = await page.locator(".selected_box").all_text_contents()
+        if not texts:
+            raise CalibrationRequired("无法读取已选时段区域，停止提交")
+        selected: set[SlotSelection] = set()
+        for text in texts:
+            cleaned = _clean_text(text)
+            groups = re.findall(r"(\d+)号(?:场)?:([^号]*?)(?=\d+号(?:场)?:|$)", cleaned)
+            if re.search(r"\d+号", cleaned) and not groups:
+                raise CalibrationRequired("无法解析已选时段，停止提交")
+            for court, ranges in groups:
+                intervals = re.findall(r"(\d{1,2}:\d{2})-(\d{1,2}:\d{2})", ranges)
+                if not intervals:
+                    raise CalibrationRequired("无法解析已选时段，停止提交")
+                for start, end in intervals:
+                    begin, finish = parse_clock(start), parse_clock(end)
+                    if begin.minute or finish.minute or finish <= begin:
+                        raise CalibrationRequired("已选区域出现非整点时段，停止提交")
+                    for hour in range(begin.hour, finish.hour):
+                        selected.add(SlotSelection(f"{court}号", f"{hour:02d}:00-{hour+1:02d}:00"))
+        return selected
+
+    async def _wait_for_exact_selection(self, page: Any, expected: set[SlotSelection]) -> bool:
+        deadline = asyncio.get_running_loop().time() + 3
+        while asyncio.get_running_loop().time() < deadline:
+            if await self._selected_slots(page) == expected:
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    async def _clear_selected_slots(self, page: Any) -> None:
+        selected = await self._selected_slots(page)
+        # 已选列表的删除按钮跨分页仍可用，不必来回翻页取消格子。
+        remove_buttons = page.locator(".selected_box .reserve-msg-row .ivu-icon-ios-close-circle")
+        for _ in range(await remove_buttons.count()):
+            await remove_buttons.first.click()
+        if selected and not await self._wait_for_exact_selection(page, set()):
+            raise CalibrationRequired("上一组已选场地未清除，停止提交")
+
+    async def _select_candidate_slots(self, candidate: LocatedCandidate) -> bool:
+        page = candidate.page
+        await self._clear_selected_slots(page)
+        expected: set[SlotSelection] = set()
+        for item in candidate.selections:
+            snapshot = await self._time_column_snapshot(page, item.time_label)
+            cell = next((cell for cell in snapshot if cell["court"] == item.court), None)
+            if cell is None or not self._cell_is_available(cell):
+                await self._clear_selected_slots(page)
+                return False
+            await self._snapshot_cell_locator(page, cell).click()
+            expected.add(item)
+            if not await self._wait_for_exact_selection(page, expected):
+                await self._clear_selected_slots(page)
+                return False
+        return bool(expected)
 
     async def _collect_matrix_candidates(
         self, venue_id: str, page: Any, plan: DailyPlan
@@ -853,13 +966,17 @@ class BookingAutomation:
                     "选择场地",
                     f"尝试场馆 {candidate.slot.venue_id}：{candidate.slot.label}",
                 )
-                item = candidate.locator
-                if item is None:
-                    item = candidate.page.locator(candidate.selector).nth(candidate.slot.dom_index)
-                if not await item.is_visible() or not await item.is_enabled():
-                    continue
-                await item.click()
-                if not await self._wait_for_slot_selection(candidate.page):
+                if candidate.selections:
+                    selected = await self._select_candidate_slots(candidate)
+                else:
+                    item = candidate.locator
+                    if item is None:
+                        item = candidate.page.locator(candidate.selector).nth(candidate.slot.dom_index)
+                    if not await item.is_visible() or not await item.is_enabled():
+                        continue
+                    await item.click()
+                    selected = await self._wait_for_slot_selection(candidate.page)
+                if not selected:
                     self.store.add_event(
                         "warning",
                         "candidate_not_selected",
@@ -872,13 +989,15 @@ class BookingAutomation:
                 await self._accept_terms(candidate.page)
                 self._set_stage("预约须知", "已勾选预约须知")
                 submit = await self._wait_for_ready_submit(candidate.page)
-                await self._save_screenshot(candidate.page, "before-submit.png")
+                if candidate.selections and await self._selected_slots(candidate.page) != set(candidate.selections):
+                    await self._clear_selected_slots(candidate.page)
+                    self._set_stage("场地选择失效", "目标时段未全部选中，跳过本组候选", level="warning")
+                    continue
                 await self._confirm_submit(candidate, plan)
                 self._start_post_submit_monitor(candidate.page)
                 await submit.click()
                 self._set_stage("提交预约", "预约表单已提交，正在识别返回页面")
                 await candidate.page.wait_for_timeout(250)
-                await self._save_screenshot(candidate.page, "after-submit.png")
                 state = await self._wait_for_post_submit_state(candidate.page)
 
                 if state == "companion_missing":
@@ -1351,7 +1470,7 @@ class BookingAutomation:
             )
             return await self._wait_for_manual_captcha(page, plan, slot)
 
-        self._set_stage("自动验证码", "求解器已返回成功，等待支付页面")
+        self._set_stage("自动验证码", "验证码点击已提交，等待支付页面确认结果")
         deadline = (
             asyncio.get_running_loop().time()
             + self.config.browser.post_submit_detection_timeout_seconds

@@ -38,7 +38,7 @@ class CaptchaChallenge:
 
 class AutoCaptchaSolver(Protocol):
     async def solve(self, challenge: CaptchaChallenge) -> bool:
-        """Return True only after the challenge has been completed successfully."""
+        """Return True after submitting all clicks; the caller must confirm the payment page."""
         ...
 
 
@@ -75,7 +75,7 @@ class LocalClickCaptchaSolver:
         image_selector: str = "#captcha-image",
         prompt_selector: str = "#captcha-prompt",
         success_selector: str = "#captcha-success",
-        click_interval: float = 0.25,
+        click_interval: float = 0.05,
         confidence_threshold: float = 0.55,
         save_debug_artifacts: bool = False,
         debug_retention_seconds: int = 3600,
@@ -255,8 +255,7 @@ class LocalClickCaptchaSolver:
             )
             return False
 
-        fresh_screenshot = await image_locator.screenshot()
-        if response_image is None and fresh_screenshot != screenshot_bytes:
+        if response_image is None and await image_locator.screenshot() != screenshot_bytes:
             await self._save_debug_text(
                 debug_challenge,
                 "captcha_changed.txt",
@@ -268,7 +267,7 @@ class LocalClickCaptchaSolver:
         # 6. 按提示顺序点击
         # -------------------------------------------------
 
-        for point in click_points:
+        for point_index, point in enumerate(click_points):
 
             if not await self._captcha_is_current(
                 page,
@@ -315,31 +314,12 @@ class LocalClickCaptchaSolver:
                 browser_y,
             )
 
-            await asyncio.sleep(
-                self.click_interval
-            )
+            if point_index + 1 < len(click_points):
+                await asyncio.sleep(self.click_interval)
 
-        # -------------------------------------------------
-        # 7. 检查验证码是否通过
-        # -------------------------------------------------
-
-        try:
-            if await success_locator.count() > 0:
-                await success_locator.wait_for(state="visible", timeout=3000)
-                return self._is_success_transition(
-                    success_was_visible,
-                    await success_locator.is_visible(),
-                )
-            await page.wait_for_timeout(1000)
-            return True
-
-        except Exception:
-            if debug_dir is not None:
-                failure_path = debug_dir / "captcha_failed.png"
-                await page.screenshot(path=str(failure_path))
-                self._restrict_permissions(failure_path, 0o600)
-
-            return False
+        # 点击提交后立即交回预约流程；由 _handle_captcha 确认真实支付页。
+        # 目标站可能已打开支付页，但原页验证码弹窗仍停留一段时间。
+        return True
 
     # =====================================================
     # OCR
