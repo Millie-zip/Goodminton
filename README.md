@@ -234,7 +234,7 @@ $RunDate = (Get-Date).ToString("yyyy-MM-dd")
 
 ## 版本范围
 
-此版本只包含运行代码、配置模板和必要说明。测试脚本、调试配置、实测报告、截图和日志留在本机，不纳入版本库。手机通知及正确支付二维码已实测可打开；耗时优化仍在进行，当前版本不保证 5 秒内点击支付。
+项目保留运行代码、安装脚本、配置模板和必要说明。临时测试脚本、调试配置、历史实测报告及旧截图已清理；后续运行生成的数据和截图仍不纳入版本库。自动验证码可能回退人工处理，当前版本不保证 5 秒内点击支付。
 
 ## Windows 定时任务
 
@@ -287,6 +287,9 @@ $RunDate = (Get-Date).ToString("yyyy-MM-dd")
 ## 目录结构
 
 ```text
+README.md                    安装、配置和日常使用
+pyproject.toml               包定义、依赖和命令入口
+requirements.txt             pip 依赖清单
 config/
   booking.example.json       可提交的配置模板
   booking.json               本机配置，不提交
@@ -294,11 +297,17 @@ scripts/
   setup.ps1                  安装项目和 Playwright
   install_tasks.ps1          注册 Windows 定时任务
 src/buaa_booking/            主程序代码
-data/                        浏览器状态、SQLite 数据库和运行状态
-artifacts/                   校准截图、运行截图和调试文件
+data/
+  browser-profile/           正式浏览器登录状态，不提交
+  state.sqlite3              正式预约计划和运行事件，不提交
+artifacts/                   运行时生成的截图、支付二维码和校准结果
 docs/
   项目逻辑说明.md            逻辑板块说明
 ```
+
+`src/` 按预约流程、验证码、手机设置页、配置、状态存储和通知划分模块。安装脚本和定时任务通过 `python -m buaa_booking` 启动，运行路径保持固定。
+
+清理旧文件时，可删除已经不需要的 `artifacts/` 历史输出和 Python 缓存。保留 `config/booking.json`、`data/state.sqlite3` 和 `data/browser-profile/`，以保存正式配置、计划及登录状态。`src/*.egg-info/` 是本机可编辑安装生成的包元数据，不作为测试产物清理。
 
 ## 安全和运行边界
 

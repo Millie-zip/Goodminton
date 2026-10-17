@@ -8,6 +8,7 @@ from datetime import datetime
 from itertools import product
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 from .captcha import (
     AutoCaptchaSolver,
@@ -104,6 +105,24 @@ class BookingError(RuntimeError):
 
 class CalibrationRequired(BookingError):
     pass
+
+
+class AuthenticationExpired(BookingError):
+    pass
+
+
+class BookingPageLoadError(BookingError):
+    pass
+
+
+AUTH_EXPIRED_JS = r"""[...document.querySelectorAll('.ivu-modal-wrap, .ivu-modal-confirm, [role="dialog"]')]
+    .some(el => el.getBoundingClientRect().width > 0 &&
+        /token.*(?:失效|过期)|(?:登录|会话).*(?:失效|过期)|请重新登录/i.test(el.textContent))"""
+
+
+PAGE_DATA_ERROR_JS = r"""[...document.querySelectorAll('.ivu-modal-wrap, .ivu-modal-confirm, [role="dialog"]')]
+    .some(el => el.getBoundingClientRect().width > 0 &&
+        /返回数据格式不正确/.test(el.textContent))"""
 
 
 async def launch_persistent_browser_context(
@@ -208,6 +227,7 @@ class BookingAutomation:
         self._post_submit_monitor: dict[str, Any] | None = None
         self.current_stage = "初始化"
         self._active_page: Any | None = None
+        self._auth_recovery_used = False
 
     async def run(self, plan: DailyPlan, *, wait_for_open: bool = True) -> None:
         if not plan.enabled:
@@ -251,9 +271,11 @@ class BookingAutomation:
             self._active_page = page
             venue_pages: dict[str, Any] = {}
             try:
+                self._set_stage("登录", "正在检查并恢复网站登录状态")
                 await self._ensure_logged_in(page)
-                self._set_stage("登录", "登录状态已确认")
+                self._set_stage("场馆校验", "首页已打开，正在检查场馆登录状态和预约数据")
                 venue_pages = await self._open_venue_pages(context, page)
+                await self._prepare_venue_pages(venue_pages)
                 self._set_stage("场馆页面", "场馆 38、39 页面已打开")
                 if wait_for_open:
                     self._set_stage("等待开放", f"等待 {self.config.open_time} 开放预约")
@@ -262,9 +284,7 @@ class BookingAutomation:
                         *(venue_page.reload(wait_until="domcontentloaded") for venue_page in venue_pages.values())
                     )
                 self._set_stage("选择日期", f"正在选择 {plan.target_date.isoformat()}")
-                await asyncio.gather(
-                    *(self._select_target_date(venue_page, plan) for venue_page in venue_pages.values())
-                )
+                await self._prepare_venue_pages(venue_pages, plan)
                 self._set_stage("选择日期", f"已选择 {plan.target_date.isoformat()}")
                 candidates = await self._load_candidates_with_refresh(venue_pages, plan)
                 if not candidates:
@@ -326,20 +346,40 @@ class BookingAutomation:
                     continue
         return None
 
+    async def _has_booking_login_markers(self, page: Any) -> bool:
+        # SSO 页也有“个人中心”链接，只有预约站点内的标记才代表已返回。
+        return (urlsplit(page.url).netloc == urlsplit(self.config.home_url).netloc
+                and await self._any_visible(page, "logged_in_markers"))
+
     async def _ensure_logged_in(self, page: Any) -> None:
         await page.goto(self.config.home_url, wait_until="domcontentloaded")
-        if await self._any_visible(page, "logged_in_markers"):
+        if await page.evaluate(f"() => {AUTH_EXPIRED_JS}"):
+            await self._renew_login(page)
+            return
+        if await self._has_booking_login_markers(page):
             return
 
         username_input = await self._first_visible(page, "login_username")
         password_input = await self._first_visible(page, "login_password")
         if username_input is None or password_input is None:
-            login_entry = await self._find_login_entry(page)
-            if login_entry is not None:
-                await login_entry.click()
-                await page.wait_for_timeout(1000)
+            # 首页含移出视口的“登录”菜单；使用目标站点的独立登录页。
+            await page.goto(urljoin(self.config.home_url, "login"), wait_until="domcontentloaded")
+            # 登录入口本身也由前端异步渲染；同时等待入口和 SSO 表单。
+            deadline = asyncio.get_running_loop().time() + self.config.browser.navigation_timeout_ms / 1000
+            entry_clicked = False
+            while asyncio.get_running_loop().time() < deadline:
+                if await self._has_booking_login_markers(page):
+                    return
                 username_input = await self._first_visible(page, "login_username")
                 password_input = await self._first_visible(page, "login_password")
+                if username_input is not None and password_input is not None:
+                    break
+                if not entry_clicked:
+                    login_entry = await self._find_login_entry(page)
+                    if login_entry is not None:
+                        await login_entry.click()
+                        entry_clicked = True
+                await asyncio.sleep(0.05)
 
         if username_input is not None and password_input is not None:
             username = self.secrets.get("buaa_username", required=True) or ""
@@ -352,7 +392,7 @@ class BookingAutomation:
             await submit.click()
             await page.wait_for_timeout(1500)
 
-        if await self._any_visible(page, "logged_in_markers"):
+        if await self._has_booking_login_markers(page):
             return
         self._notify(
             "需要完成登录",
@@ -363,10 +403,92 @@ class BookingAutomation:
         )
         deadline = asyncio.get_running_loop().time() + 180
         while asyncio.get_running_loop().time() < deadline:
-            if await self._any_visible(page, "logged_in_markers"):
+            if await self._has_booking_login_markers(page):
                 return
             await asyncio.sleep(1)
         raise BookingError("等待人工登录超时")
+
+    async def _wait_for_authenticated_condition(self, page: Any, condition: str) -> None:
+        result = await page.wait_for_function(
+            f"() => {{ if ({AUTH_EXPIRED_JS}) return 'expired'; "
+            f"if ({PAGE_DATA_ERROR_JS}) return 'data_error'; return ({condition})() ? 'ready' : false; }}",
+            timeout=self.config.browser.navigation_timeout_ms, polling=50,
+        )
+        try:
+            state = await result.json_value()
+            if state == "expired":
+                raise AuthenticationExpired("网站登录已过期（Token 失效），需要重新登录")
+            if state == "data_error":
+                raise BookingPageLoadError("网站提示：返回数据格式不正确，预约数据未加载")
+        finally:
+            await result.dispose()
+
+    async def _prepare_venue_pages(self, pages: dict[str, Any], plan: DailyPlan | None = None) -> None:
+        # 等所有并发读取结束后再重新登录，避免另一页仍在操作旧会话。
+        data_retries = 0
+        # 最多两次数据重载和一次登录恢复，最后一轮检查恢复结果。
+        for _ in range(4):
+            results = await asyncio.gather(*(
+                self._select_target_date(page, plan) if plan is not None else self._wait_for_booking_table(page)
+                for page in pages.values()
+            ), return_exceptions=True)
+            expired = next((page for page, result in zip(pages.values(), results)
+                            if isinstance(result, AuthenticationExpired)), None)
+            if expired is not None:
+                await self._renew_login(expired)
+                await asyncio.gather(*(page.goto(self.config.venue_urls[venue], wait_until="domcontentloaded")
+                                       for venue, page in pages.items()))
+                continue
+            failed = []
+            for (venue, page), result in zip(pages.items(), results):
+                if isinstance(result, BookingPageLoadError):
+                    failed.append((venue, page))
+                elif isinstance(result, Exception):
+                    raise BookingError(f"场馆 {venue} 页面校验失败：{result}") from result
+                elif isinstance(result, BaseException):
+                    raise result
+            if not failed:
+                return
+            venues = "、".join(venue for venue, _ in failed)
+            if data_retries >= 2:
+                raise BookingPageLoadError(
+                    f"场馆 {venues}：网站持续提示返回数据格式不正确，已重新加载 2 次，停止本次预约")
+            data_retries += 1
+            self._set_stage("场馆数据重试", f"场馆 {venues} 返回数据格式不正确，重新加载 {data_retries}/2", level="warning")
+            await asyncio.sleep(0.3 * data_retries)
+            await asyncio.gather(*(page.goto(self.config.venue_urls[venue], wait_until="domcontentloaded")
+                                   for venue, page in failed))
+        raise BookingPageLoadError("场馆页面恢复次数已用尽，停止本次预约")
+
+    async def _renew_login(self, page: Any) -> None:
+        if self._auth_recovery_used:
+            raise AuthenticationExpired("重新登录后 Token 仍失效，请手动完成网站登录；本次停止预约")
+        self._auth_recovery_used = True
+        self._set_stage("恢复登录", "检测到 Token 过期，正在通过网站登录入口恢复会话", level="warning")
+        await page.bring_to_front()
+        modal = page.locator(".ivu-modal-wrap:visible").filter(
+            has_text=re.compile(r"Token.*(?:失效|过期)|请重新登录", re.I)).first
+        if await modal.count():
+            await modal.get_by_role("button", name="确定", exact=True).click()
+        # /venue/login 在旧令牌仍存在时会直接回首页；先走网页自身的退出流程。
+        logout = await self._first_visible_with_fallback(page, "logout_button", (
+            "text=/^退出$/", "text=/^退出登录$/",
+        ))
+        if logout is None:
+            # 有些过期响应会直接清除会话并跳到登录页，此时已无需再次退出。
+            if (await self._find_login_entry(page) is not None
+                    or await self._first_visible(page, "login_username") is not None):
+                await self._ensure_logged_in(page)
+                return
+            raise AuthenticationExpired("Token 已过期，但未找到网站退出入口，请手动重新登录")
+        await logout.click()
+        confirm = page.locator(".ivu-modal-wrap:visible").filter(has_text="是否退出本系统").first
+        await confirm.get_by_role("button", name="确定", exact=True).click()
+        # 等待站点清理旧登录状态，不能立即导航打断退出请求。
+        await page.wait_for_function(r"""() => ![...document.querySelectorAll('a,span,div')].some(el =>
+            el.getBoundingClientRect().width > 0 && /^(个人中心|退出|退出登录)$/.test(el.textContent.trim()))""",
+            timeout=self.config.browser.navigation_timeout_ms, polling=50)
+        await self._ensure_logged_in(page)
 
     async def _open_venue_pages(self, context: Any, first_page: Any) -> dict[str, Any]:
         pages: dict[str, Any] = {}
@@ -471,10 +593,10 @@ class BookingAutomation:
         target_label = f"{plan.target_date.month:02d}月{plan.target_date.day:02d}日"
         target_card = page.locator("div.date_box > div").nth(2)
         try:
-            await target_card.wait_for(
-                state="attached",
-                timeout=self.config.browser.navigation_timeout_ms,
-            )
+            await self._wait_for_authenticated_condition(page,
+                "() => document.querySelectorAll('div.date_box > div').length >= 3")
+        except (AuthenticationExpired, BookingPageLoadError):
+            raise
         except Exception as exc:
             raise CalibrationRequired("日期控件 order: 2 块未完成渲染") from exc
 
@@ -513,7 +635,7 @@ class BookingAutomation:
             ) from exc
 
     async def _wait_for_booking_table(self, page: Any) -> None:
-        await page.wait_for_function(
+        await self._wait_for_authenticated_condition(page,
             r"""() => {
                 const table = document.querySelector('.spaceTable > table');
                 if (!table || table.querySelectorAll('tr').length < 3) return false;
@@ -525,7 +647,6 @@ class BookingAutomation:
                     el.classList.contains('fade-leave-active')
                 );
             }""",
-            timeout=self.config.browser.navigation_timeout_ms, polling=50,
         )
 
     @staticmethod

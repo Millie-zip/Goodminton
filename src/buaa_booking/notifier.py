@@ -107,8 +107,18 @@ class BarkNotifier:
                 _raise_safe_bark_error(exc.code, error_body.get("message") or exc.reason)
             except NotificationError as error:
                 raise error from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise NotificationError("Bark 通知发送失败") from exc
+        except urllib.error.URLError as exc:
+            # 原始异常可能带请求 URL；只记录类型和数字错误码，避免泄露 Device Key。
+            reason = exc.reason
+            error_code = getattr(reason, "errno", None)
+            detail = type(reason).__name__
+            if isinstance(error_code, int):
+                detail += f", errno={error_code}"
+            raise NotificationError(f"Bark 网络连接失败（{detail}）") from exc
+        except TimeoutError as exc:
+            raise NotificationError("Bark 网络请求超时") from exc
+        except json.JSONDecodeError as exc:
+            raise NotificationError("Bark 返回了无效 JSON 响应") from exc
         if body.get("code") != 200:
             _raise_safe_bark_error(int(body.get("code") or 400), body.get("message"))
         timestamp = body.get("timestamp")
