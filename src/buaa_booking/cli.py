@@ -8,7 +8,9 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from .artifacts import daily_run_artifacts
 from .automation import run_booking
 from .captcha import LocalClickCaptchaSolver
 from .calibration import calibrate
@@ -55,8 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_runtime(config_path: Path) -> tuple[AppConfig, StateStore, SecretStore, Any]:
-    config = load_config(config_path)
+def _load_runtime(
+    config_path: Path, config: AppConfig | None = None,
+) -> tuple[AppConfig, StateStore, SecretStore, Any]:
+    config = config or load_config(config_path)
     root = config_path.resolve().parent.parent
     store = StateStore(root / "data" / "state.sqlite3")
     secrets = SecretStore()
@@ -221,12 +225,48 @@ def _show(config: AppConfig, store: StateStore) -> None:
         )
 
 
+def _run_daily(args: argparse.Namespace) -> None:
+    artifacts_root = args.config.resolve().parent.parent / "artifacts"
+    try:
+        config = load_config(args.config)
+    except Exception:
+        # 配置尚不可用时，仍按北京时间归档启动错误并执行清理。
+        timezone = ZoneInfo("Asia/Shanghai")
+        with daily_run_artifacts(
+            artifacts_root, args.run_date or datetime.now(timezone).date(), timezone,
+        ):
+            raise
+
+    run_date = args.run_date or _effective_run_date_for_booking_window(
+        datetime.now(config.tz), config.open_time,
+    )
+    with daily_run_artifacts(artifacts_root, run_date, config.tz) as output_dir:
+        config, store, secrets, notifier = _load_runtime(args.config, config)
+        plan = store.get_plan(run_date)
+        if plan is None:
+            plan = DailyPlan.for_run_date(
+                run_date, config.days_ahead,
+                config.default_start_time, config.default_end_time,
+            )
+            store.save_plan(plan)
+        captcha_solver = _build_captcha_solver(config)
+        asyncio.run(
+            run_booking(
+                config, store, secrets, notifier, plan, output_dir,
+                wait_for_open=not args.now, captcha_solver=captcha_solver,
+            )
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
             _init_config(args.config, args.force)
+            return
+        if args.command == "run":
+            _run_daily(args)
             return
 
         config, store, secrets, notifier = _load_runtime(args.config)
@@ -240,43 +280,6 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "prompt":
             sent = _send_prompt(config, store, secrets, notifier, args.reminder)
             print("提醒已发送。" if sent else "本次未发送设置链接，请运行 show 查看记录。")
-        elif args.command == "run":
-            run_date = args.run_date or _effective_run_date_for_booking_window(
-                datetime.now(config.tz),
-                config.open_time,
-            )
-            plan = store.get_plan(run_date)
-            if plan is None:
-                plan = _resolve_or_create_plan_for_booking_window(
-                    config,
-                    store,
-                    datetime.now(config.tz),
-                )
-            run_date = plan.run_date
-            if plan is None:
-                message = f"{run_date.isoformat()} 没有预约计划，程序已结束。"
-                store.add_event("info", "no_plan", message)
-                try:
-                    notifier.send("今日预约未执行", message, silent=True)
-                except Exception as exc:
-                    store.add_event(
-                        "warning", "notification_failed", f"今日预约未执行：{exc}"
-                    )
-                print(f"{run_date.isoformat()} 没有预约计划，程序结束。")
-                return
-            captcha_solver = _build_captcha_solver(config)
-            asyncio.run(
-                run_booking(
-                    config,
-                    store,
-                    secrets,
-                    notifier,
-                    plan,
-                    root / "artifacts" / run_date.isoformat(),
-                    wait_for_open=not args.now,
-                    captcha_solver=captcha_solver,
-                )
-            )
         elif args.command == "calibrate":
             report_path = asyncio.run(calibrate(config, root / "artifacts"))
             print(f"页面结构已保存：{report_path}")

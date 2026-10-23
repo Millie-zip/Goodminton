@@ -34,6 +34,7 @@
     "manual_captcha_timeout_seconds": 600,
     "payment_hold_seconds": 60,
     "availability_refresh_count": 3,
+    "availability_timeout_seconds": 15,
     "availability_refresh_interval_seconds": 1.0
   },
   "selectors": {

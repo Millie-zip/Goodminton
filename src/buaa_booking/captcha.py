@@ -88,6 +88,7 @@ class LocalClickCaptchaSolver:
         self.confidence_threshold = confidence_threshold
         self.save_debug_artifacts = save_debug_artifacts
         self.debug_retention_seconds = debug_retention_seconds
+        self.last_failure_reason = ""
 
         if debug_retention_seconds <= 0:
             raise ValueError("debug_retention_seconds 必须大于 0")
@@ -96,6 +97,7 @@ class LocalClickCaptchaSolver:
         self.ocr = rapidocr.RapidOCR()
 
     async def solve(self, challenge: CaptchaChallenge) -> bool:
+        self.last_failure_reason = ""
         page = challenge.page
         initial_url = page.url
 
@@ -124,10 +126,11 @@ class LocalClickCaptchaSolver:
         # 1. 读取点击顺序
         # -------------------------------------------------
 
-        prompt_locator = page.locator(self.prompt_selector)
+        prompt_locator = await self._find_prompt_locator(page)
         prompt_text = await self._read_prompt_text(prompt_locator, challenge.response_payload)
-        targets = self._targets_from_payload(challenge.response_payload)
+        targets = self._targets_from_payload(challenge.response_payload) or challenge.word_list
         if not targets:
+            self.last_failure_reason = f"无法读取目标字符，页面提示：{prompt_text!r}"
             targets = self._parse_prompt(prompt_text)
 
         if not targets:
@@ -167,8 +170,9 @@ class LocalClickCaptchaSolver:
         # -------------------------------------------------
 
         chars = await asyncio.to_thread(
-            self._run_ocr,
+            self._recognize_targets,
             screenshot_bytes,
+            targets,
         )
 
         chars = [
@@ -215,6 +219,10 @@ class LocalClickCaptchaSolver:
             )
 
             if candidate is None:
+                self.last_failure_reason = (
+                    f"OCR 未找到目标字符 {target!r}，目标 {targets!r}，"
+                    f"识别到 {[c.char for c in chars]!r}"
+                )
                 await self._save_debug_text(
                     debug_challenge,
                     "missing_char.txt",
@@ -248,6 +256,7 @@ class LocalClickCaptchaSolver:
         success_locator = page.locator(self.success_selector)
         success_was_visible = await success_locator.is_visible()
         if success_was_visible:
+            self.last_failure_reason = "求解前成功元素已经可见"
             await self._save_debug_text(
                 debug_challenge,
                 "success_already_visible.txt",
@@ -256,6 +265,7 @@ class LocalClickCaptchaSolver:
             return False
 
         if response_image is None and await image_locator.screenshot() != screenshot_bytes:
+            self.last_failure_reason = "OCR 期间验证码图片发生变化"
             await self._save_debug_text(
                 debug_challenge,
                 "captcha_changed.txt",
@@ -277,6 +287,7 @@ class LocalClickCaptchaSolver:
                     expected_targets=targets,
                     expected_prompt=prompt_text,
             ):
+                self.last_failure_reason = "点击前验证码页面或提示发生变化"
                 await self._save_debug_text(
                     debug_challenge,
                     "captcha_state_changed.txt",
@@ -286,6 +297,7 @@ class LocalClickCaptchaSolver:
 
             element_box = await image_locator.bounding_box()
             if not self._is_valid_element_box(element_box):
+                self.last_failure_reason = "验证码图片元素位置无效"
                 return False
 
             scale_x = element_box["width"] / image_width
@@ -302,6 +314,7 @@ class LocalClickCaptchaSolver:
             )
 
             if not self._is_click_inside_element(browser_x, browser_y, element_box):
+                self.last_failure_reason = "点击坐标超出验证码图片"
                 await self._save_debug_text(
                     debug_challenge,
                     "invalid_click_position.txt",
@@ -332,6 +345,61 @@ class LocalClickCaptchaSolver:
         return [char for char in chars if not (
             char.char in "场馆预约" and char.x >= width * 0.65 and char.y >= height * 0.85
         )]
+
+    def _recognize_targets(self, image_bytes: bytes, targets: list[str]) -> list[OCRChar]:
+        """Retry rotated, enlarged views only when the normal OCR misses a target."""
+        import cv2
+        import numpy as np
+
+        image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise AutoCaptchaUnavailable("验证码图片无法解码")
+        height, width = image.shape[:2]
+        chars = self._without_footer(self._run_ocr(image_bytes), width, height)
+
+        def complete() -> bool:
+            used: set[int] = set()
+            for target in targets:
+                candidate = self._find_best_char(target, chars, used)
+                if candidate is None:
+                    return False
+                used.add(candidate[0])
+            return True
+
+        if complete():
+            return chars
+        enlarged = cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        enlarged_height, enlarged_width = enlarged.shape[:2]
+        for angle in (0, -30, 30, -45, 45, -15, 15):
+            matrix = cv2.getRotationMatrix2D((enlarged_width / 2, enlarged_height / 2), angle, 1)
+            cosine, sine = abs(matrix[0, 0]), abs(matrix[0, 1])
+            rotated_width = int(enlarged_height * sine + enlarged_width * cosine)
+            rotated_height = int(enlarged_height * cosine + enlarged_width * sine)
+            matrix[0, 2] += (rotated_width - enlarged_width) / 2
+            matrix[1, 2] += (rotated_height - enlarged_height) / 2
+            rotated = cv2.warpAffine(
+                enlarged, matrix, (rotated_width, rotated_height), borderValue=(255, 255, 255),
+            )
+            ok, encoded = cv2.imencode(".png", rotated)
+            if not ok:
+                continue
+            inverse = cv2.invertAffineTransform(matrix)
+            for char in self._run_ocr(encoded.tobytes()):
+                x, y = inverse @ np.array([char.x, char.y, 1.0]) / 2
+                candidate = OCRChar(char.char, float(x), float(y), char.score)
+                if not self._is_valid_ocr_position(candidate, width, height):
+                    continue
+                if not self._without_footer([candidate], width, height):
+                    continue
+                duplicate = next((old for old in chars if old.char == candidate.char
+                                  and math.hypot(old.x - candidate.x, old.y - candidate.y) < 12), None)
+                if duplicate is None:
+                    chars.append(candidate)
+                elif candidate.score > duplicate.score:
+                    duplicate.x, duplicate.y, duplicate.score = candidate.x, candidate.y, candidate.score
+            if complete():
+                break
+        return chars
 
     def _run_ocr(
         self,
@@ -513,6 +581,8 @@ class LocalClickCaptchaSolver:
             (index, char)
             for index, char in enumerate(chars)
             if index not in used_indices
+            and not any(math.hypot(char.x - chars[used].x, char.y - chars[used].y) < 12
+                        for used in used_indices)
             and self._normalize_ocr_char(char.char) == normalized_target
         )
 
@@ -649,6 +719,20 @@ class LocalClickCaptchaSolver:
         if fallback_candidates:
             return max(fallback_candidates, key=lambda item: item[0])[1]
         raise AutoCaptchaUnavailable("无法定位验证码图片元素")
+
+    async def _find_prompt_locator(self, page: Any) -> Any:
+        scopes = [page] + [
+            frame for frame in getattr(page, "frames", [])
+            if frame is not getattr(page, "main_frame", None)
+        ]
+        for scope in scopes:
+            for selector in (self.prompt_selector, ".verify-bar-area .verify-msg", ".verify-bar-area"):
+                locator = scope.locator(selector)
+                for index in range(min(await locator.count(), 10)):
+                    candidate = locator.nth(index)
+                    if await candidate.is_visible():
+                        return candidate
+        return page.locator(self.prompt_selector)
 
     @staticmethod
     async def _read_prompt_text(locator: Any, payload: Any) -> str:

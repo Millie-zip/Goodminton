@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -7,6 +8,10 @@ from pathlib import Path
 from typing import Iterator
 
 from .models import DailyPlan, Event, PlanStatus
+
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class StateStore:
@@ -106,6 +111,7 @@ class StateStore:
         )
 
     def add_event(self, level: str, event_type: str, message: str) -> None:
+        logger.log(getattr(logging, level.upper(), logging.INFO), "%s: %s", event_type, message)
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO events (created_at, level, event_type, message) VALUES (?, ?, ?, ?)",

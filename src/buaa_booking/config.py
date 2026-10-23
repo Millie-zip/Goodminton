@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ class BrowserConfig:
     payment_hold_seconds: int
     availability_refresh_count: int
     availability_refresh_interval_seconds: float
+    availability_timeout_seconds: float = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +127,9 @@ def load_config(path: Path) -> AppConfig:
     payment_hold = int(_required(browser_raw, "payment_hold_seconds"))
     refresh_count = int(_required(browser_raw, "availability_refresh_count"))
     refresh_interval = float(_required(browser_raw, "availability_refresh_interval_seconds"))
+    availability_timeout = float(browser_raw.get("availability_timeout_seconds", 15.0))
+    if not math.isfinite(availability_timeout) or availability_timeout <= 0:
+        raise ValueError("场地读取和选择的总时限必须为有限正数")
     if min(
         navigation_timeout_ms,
         post_submit_detection_timeout,
@@ -170,6 +175,7 @@ def load_config(path: Path) -> AppConfig:
             payment_hold_seconds=payment_hold,
             availability_refresh_count=refresh_count,
             availability_refresh_interval_seconds=refresh_interval,
+            availability_timeout_seconds=availability_timeout,
         ),
         selectors={str(k): tuple(str(item) for item in v) for k, v in selectors_raw.items()},
     )

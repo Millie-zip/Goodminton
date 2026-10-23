@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import product
@@ -286,11 +288,13 @@ class BookingAutomation:
                 self._set_stage("选择日期", f"正在选择 {plan.target_date.isoformat()}")
                 await self._prepare_venue_pages(venue_pages, plan)
                 self._set_stage("选择日期", f"已选择 {plan.target_date.isoformat()}")
-                candidates = await self._load_candidates_with_refresh(venue_pages, plan)
+                self._set_stage("检测场地", "正在读取目标时段的可预约场地")
+                deadline = self._candidate_deadline()
+                candidates = await self._load_candidates_with_refresh(venue_pages, plan, deadline=deadline)
                 if not candidates:
                     raise BookingError("两个场馆都没有找到符合时间的可预约场地")
                 self._set_stage("检测场地", f"找到 {len(candidates)} 个候选场地")
-                await self._attempt_candidates(candidates, plan, venue_pages)
+                await self._attempt_candidates(candidates, plan, venue_pages, deadline=deadline)
             except Exception as exc:
                 failure_page = self._active_page or page
                 await self._save_screenshot(failure_page, "failure.png")
@@ -589,26 +593,46 @@ class BookingAutomation:
         )
 
     async def _select_target_date(self, page: Any, plan: DailyPlan) -> None:
-        # 当前目标页面第三张卡片对应后天；不依赖加载期间会变化的 style 属性。
+        # 站点可能只开放两天；按计划日期定位，不能把第三张卡片当作加载条件。
         target_label = f"{plan.target_date.month:02d}月{plan.target_date.day:02d}日"
-        target_card = page.locator("div.date_box > div").nth(2)
-        try:
-            await self._wait_for_authenticated_condition(page,
-                "() => document.querySelectorAll('div.date_box > div').length >= 3")
-        except (AuthenticationExpired, BookingPageLoadError):
-            raise
-        except Exception as exc:
-            raise CalibrationRequired("日期控件 order: 2 块未完成渲染") from exc
+        cards = page.locator("div.date_box > div:visible")
+        target_card = cards.filter(has=page.locator(
+            "span", has_text=re.compile(rf"^\s*{re.escape(target_label)}\s*$")
+        ))
 
-        phase = "等待初始预约表格加载"
+        phase = "等待日期控件和初始预约表格加载"
         try:
             # 日期卡片先于初始场地数据出现；等初始请求结束后再切换日期，
             # 避免初始数据覆盖目标日期，或占满目标日期请求的等待时间。
-            await self._wait_for_booking_table(page)
+            for attempt in range(2):
+                await self._wait_for_authenticated_condition(page, r"""() => {
+                    const label = document.querySelector('div.date_box > div > span');
+                    return label && label.getBoundingClientRect().width > 0 &&
+                        /\d{1,2}月\d{1,2}日/.test(label.textContent);
+                }""")
+                await self._wait_for_booking_table(page)
+                count = await target_card.count()
+                if count == 1:
+                    break
+                if count > 1:
+                    raise CalibrationRequired(f"日期控件中目标日期 {target_label} 重复，停止选择")
+                if attempt == 0:
+                    # 开放瞬间可能拿到旧的日期窗口；仅重载一次，不改约其他日期。
+                    self._set_stage("选择日期", f"页面尚未列出 {target_label}，重新加载日期窗口一次")
+                    await page.reload(wait_until="domcontentloaded")
+                    continue
+                available = "、".join(await cards.locator("span").all_text_contents()) or "无"
+                notice = " ".join(await page.locator(".date_box_title:visible").all_text_contents())
+                notice = re.sub(r"\s+", " ", notice).strip()
+                raise BookingError(
+                    f"目标日期 {plan.target_date.isoformat()} 不在网站当前可选日期中"
+                    f"（已重新加载 1 次）；可选日期：{available}；"
+                    f"网站提示：{notice or '无'}。未选择其他日期。"
+                )
             date_text = _clean_text(await target_card.locator("span").first.inner_text())
             if date_text != target_label:
                 raise CalibrationRequired(
-                    f"order: 2 日期为 {date_text}，不是目标日期 {target_label}"
+                    f"日期卡片为 {date_text}，不是目标日期 {target_label}"
                 )
             classes = (await target_card.get_attribute("class") or "").split()
             if "active" not in classes:
@@ -656,19 +680,25 @@ class BookingAutomation:
             and f"searchDate={plan.target_date.isoformat()}" in response.url
         )
 
+    def _candidate_deadline(self) -> float:
+        return asyncio.get_running_loop().time() + self.config.browser.availability_timeout_seconds
+
     async def _load_candidates_with_refresh(
-        self, venue_pages: dict[str, Any], plan: DailyPlan
+        self, venue_pages: dict[str, Any], plan: DailyPlan, *, deadline: float | None = None
     ) -> list[LocatedCandidate]:
-        for attempt in range(self.config.browser.availability_refresh_count):
-            candidates = await self._collect_candidates(venue_pages, plan)
-            if candidates:
-                return candidates
-            if attempt + 1 < self.config.browser.availability_refresh_count:
-                await asyncio.sleep(self.config.browser.availability_refresh_interval_seconds)
-                await asyncio.gather(*(page.reload(wait_until="domcontentloaded") for page in venue_pages.values()))
-                await asyncio.gather(
-                    *(self._select_target_date(page, plan) for page in venue_pages.values())
-                )
+        deadline = self._candidate_deadline() if deadline is None else deadline
+        try:
+            async with asyncio.timeout_at(deadline):
+                for attempt in range(self.config.browser.availability_refresh_count):
+                    self._set_stage("检测场地", f"读取候选 {attempt + 1}/{self.config.browser.availability_refresh_count}")
+                    candidates = await self._collect_candidates(venue_pages, plan)
+                    if candidates:
+                        return candidates
+                    if attempt + 1 < self.config.browser.availability_refresh_count:
+                        await asyncio.sleep(self.config.browser.availability_refresh_interval_seconds)
+                        await self._restart_booking_pages(venue_pages, plan)
+        except TimeoutError as exc:
+            raise BookingError("读取可预约场地超时，未提交订单") from exc
         return []
 
     async def _collect_candidates(
@@ -696,10 +726,24 @@ class BookingAutomation:
         self, venue_id: str, page: Any, plan: DailyPlan
     ) -> list[LocatedCandidate]:
         periods = self._requested_time_slots(plan)
+        await self._wait_for_booking_table(page)
         options = []
         for period in periods:
+            started = asyncio.get_running_loop().time()
             snapshot = await self._time_column_snapshot(page, period)
-            options.append([cell for cell in snapshot if self._cell_is_available(cell)])
+            reasons = Counter(self._cell_rejection_reason(cell) or "可预约" for cell in snapshot)
+            available = [cell for cell in snapshot if self._cell_is_available(cell)]
+            options.append(available)
+            self.store.add_event(
+                "info", "candidate_scan",
+                f"场馆 {venue_id} 日期 {plan.target_date} 时段 {period}："
+                f"读取 {len(snapshot)} 格，可预约 {len(available)} 格，"
+                f"分类 {dict(reasons)}，耗时 {(asyncio.get_running_loop().time() - started) * 1000:.0f}ms",
+            )
+            if not available or reasons["结构不明"] or reasons["状态不明"]:
+                self._save_candidate_snapshot(venue_id, plan, period, snapshot)
+            if reasons["结构不明"] or reasons["状态不明"]:
+                raise CalibrationRequired(f"场馆 {venue_id} {period} 的价格格结构或状态无法确认，请检查候选快照")
         if any(not cells for cells in options):
             return []
 
@@ -732,7 +776,8 @@ class BookingAutomation:
                 "ivu-icon-ios-arrow-back" if target < headers[1]
                 else "ivu-icon-ios-arrow-forward"
             )
-            arrow = table.locator(f"tr:first-child .{arrow_class}")
+            # 页脚也会重复表头；限定第一行，避免同时命中上下两个翻页箭头。
+            arrow = table.locator("tr").first.locator(f".{arrow_class}")
             if not await arrow.count():
                 break
             old_header = await table.locator("tr").first.text_content()
@@ -749,63 +794,144 @@ class BookingAutomation:
 
     async def _time_column_snapshot(self, page: Any, target: str) -> list[dict[str, Any]]:
         await self._show_time_column(page, target)
-        return await page.locator(".spaceTable > table").evaluate(
+        result = await page.locator(".spaceTable > table").evaluate(
             r"""(table, target) => {
                 const rows = [...table.querySelectorAll('tr')];
                 const text = el => (el?.textContent || '').replace(/\s+/g, '').replace(/：/g, ':').replace(/[—–至~]/g, '-');
-                const column = [...rows[0].querySelectorAll('td,th')].findIndex(el => text(el) === target);
-                return rows.flatMap((row, index) => {
-                    const cells = [...row.querySelectorAll('td,th')];
+                const headers = [...(rows[0]?.cells || [])];
+                const labels = headers.map(text);
+                if (labels.filter(label => label === target).length !== 1 ||
+                    headers.some(cell => cell.colSpan !== 1 || cell.rowSpan !== 1))
+                    return {error: '目标表头缺失、重复或存在未知合并结构'};
+                const column = labels.indexOf(target);
+                const cells = rows.flatMap((row, index) => {
+                    const cells = [...row.cells];
                     const court = text(cells[0]).replace(/号场$/, '号');
                     if (!/^\d+号$/.test(court)) return [];
                     let logicalColumn = 0;
                     for (let i=0; i<cells.length; i++) {
                         const span = cells[i].colSpan || 1;
-                        if (column >= logicalColumn && column < logicalColumn + span)
-                            return [{row:index, column:i, court, span, text:text(cells[i])}];
+                        if (column >= logicalColumn && column < logicalColumn + span) {
+                            const cell = cells[i];
+                            const blocks = [...cell.querySelectorAll('.reserveBlock')];
+                            const block = blocks.length === 1 ? blocks[0] : null;
+                            // 网站每页末格 colspan=2 是布局补偿，并没有覆盖第二个时段。
+                            const trailingLayout = span === 2 && i === cells.length - 1 &&
+                                logicalColumn === headers.length - 1 && column === logicalColumn;
+                            return [{row:index, column:i, court, span, text:text(cell),
+                                singlePeriod: cell.rowSpan === 1 && (span === 1 || trailingLayout),
+                                blockCount: blocks.length,
+                                classes: block ? [...block.classList] : [],
+                                visible: !!block && block.getClientRects().length > 0 &&
+                                    getComputedStyle(block).visibility !== 'hidden',
+                                disabled: cell.hasAttribute('disabled') || cell.getAttribute('aria-disabled') === 'true' ||
+                                    !!block && (block.hasAttribute('disabled') || block.getAttribute('aria-disabled') === 'true'),
+                                headers: labels}];
+                        }
                         logicalColumn += span;
                     }
-                    return [];
+                    return [{row:index, column:-1, court, span:0, text:'',
+                        singlePeriod:false, blockCount:0, classes:[], visible:false, disabled:false,
+                        headers:labels}];
                 });
+                return {cells};
             }""", target,
         )
+        if result.get("error"):
+            raise CalibrationRequired(f"{target}：{result['error']}")
+        if not result["cells"]:
+            raise CalibrationRequired(f"{target}：未解析到场地行，不能判为无可用场地")
+        return result["cells"]
+
+    def _cell_rejection_reason(self, cell: dict[str, Any]) -> str | None:
+        classes = set(cell["classes"])
+        if cell["disabled"] or classes.intersection({"disabled", "reservation", "reserved", "newReservation"}):
+            return "不可预约状态"
+        if any(word in cell["text"] for word in ("已售", "占用", "结束", "活动", "不可预约", "已锁定")):
+            return "不可预约文本"
+        # 组件在该场地没有此时段数据时会留下空 td；它不是可预约格，也不应阻断其他场地。
+        if cell["column"] >= 0 and cell["blockCount"] == 0 and not cell["text"]:
+            return "空单元格"
+        if not cell["singlePeriod"] or cell["blockCount"] != 1:
+            return "结构不明"
+        if not cell["visible"]:
+            return "不可见"
+        if "free" not in classes:
+            return "状态不明"
+        if not self._is_available_slot_text(cell["text"]):
+            return "无价格或可预约标记"
+        return None
 
     def _cell_is_available(self, cell: dict[str, Any]) -> bool:
-        return (cell["span"] == 1 and self._is_available_slot_text(cell["text"])
-                and not any(word in cell["text"] for word in ("已售", "占用", "结束", "活动")))
+        return self._cell_rejection_reason(cell) is None
+
+    def _save_candidate_snapshot(
+        self, venue_id: str, plan: DailyPlan, period: str, snapshot: list[dict[str, Any]]
+    ) -> None:
+        # 仅保存结构/状态，不保存单元格原文、账号、联系方式或整页 HTML。
+        record = {
+            "date": plan.target_date.isoformat(), "venue": venue_id, "period": period,
+            "observed_at": datetime.now(self.config.tz).isoformat(),
+            "headers": snapshot[0]["headers"] if snapshot else [],
+            "cells": [
+                {key: cell[key] for key in ("court", "column", "span", "singlePeriod", "classes")}
+                | {"reason": self._cell_rejection_reason(cell), "has_price": self._is_available_slot_text(cell["text"])}
+                for cell in snapshot
+            ],
+        }
+        try:
+            with (self.artifacts_dir / "candidate-snapshots.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self.store.add_event("warning", "candidate_snapshot_failed", f"候选快照保存失败：{type(exc).__name__}")
 
     @staticmethod
     def _snapshot_cell_locator(page: Any, cell: dict[str, Any]) -> Any:
-        return page.locator(".spaceTable > table tr").nth(cell["row"]).locator("td, th").nth(cell["column"])
+        return page.locator(".spaceTable > table tr").nth(cell["row"]).locator("td, th").nth(cell["column"]).locator(".reserveBlock")
 
     async def _selected_slots(self, page: Any) -> set[SlotSelection]:
         # 目标网页在尚未选场时隐藏此容器，但容器仍在 DOM 中。
-        texts = await page.locator(".selected_box").all_text_contents()
-        if not texts:
+        container = page.locator(".selected_box")
+        if not await container.count():
             raise CalibrationRequired("无法读取已选时段区域，停止提交")
+        # 每条记录包含价格；整区拼接会把“￥35.00”与下一条“7号”连成“007号”。
+        # 必须保留网站 .reserve-msg-row 的边界，再分别读取场地号和时段。
+        texts = await container.locator(".reserve-msg-row").all_text_contents()
+        if not texts and any(
+            _clean_text(text) not in ("", "已选")
+            for text in await container.all_text_contents()
+        ):
+            raise CalibrationRequired("已选区域存在无法读取的场地记录，停止提交")
         selected: set[SlotSelection] = set()
         for text in texts:
             cleaned = _clean_text(text)
-            groups = re.findall(r"(\d+)号(?:场)?:([^号]*?)(?=\d+号(?:场)?:|$)", cleaned)
-            if re.search(r"\d+号", cleaned) and not groups:
+            match = re.fullmatch(r"(\d+)号(?:场)?:([^号]+)", cleaned)
+            if match is None:
                 raise CalibrationRequired("无法解析已选时段，停止提交")
-            for court, ranges in groups:
-                intervals = re.findall(r"(\d{1,2}:\d{2})-(\d{1,2}:\d{2})", ranges)
-                if not intervals:
-                    raise CalibrationRequired("无法解析已选时段，停止提交")
-                for start, end in intervals:
-                    begin, finish = parse_clock(start), parse_clock(end)
-                    if begin.minute or finish.minute or finish <= begin:
-                        raise CalibrationRequired("已选区域出现非整点时段，停止提交")
-                    for hour in range(begin.hour, finish.hour):
-                        selected.add(SlotSelection(f"{court}号", f"{hour:02d}:00-{hour+1:02d}:00"))
+            court, ranges = match.groups()
+            intervals = re.findall(r"(\d{1,2}:\d{2})-(\d{1,2}:\d{2})", ranges)
+            if not intervals:
+                raise CalibrationRequired("无法解析已选时段，停止提交")
+            for start, end in intervals:
+                begin, finish = parse_clock(start), parse_clock(end)
+                if begin.minute or finish.minute or finish <= begin:
+                    raise CalibrationRequired("已选区域出现非整点时段，停止提交")
+                for hour in range(begin.hour, finish.hour):
+                    selected.add(SlotSelection(f"{court}号", f"{hour:02d}:00-{hour+1:02d}:00"))
         return selected
 
-    async def _wait_for_exact_selection(self, page: Any, expected: set[SlotSelection]) -> bool:
+    async def _wait_for_exact_selection(
+        self, page: Any, expected: set[SlotSelection], *, clicked: Any | None = None
+    ) -> bool:
         deadline = asyncio.get_running_loop().time() + 3
         while asyncio.get_running_loop().time() < deadline:
             if await self._selected_slots(page) == expected:
                 return True
+            if clicked is not None and await clicked.evaluate(
+                "el => ['disabled','reservation','reserved','newReservation'].some(c => el.classList.contains(c))"
+                " || el.getAttribute('aria-disabled') === 'true'"
+            ):
+                return False
             await asyncio.sleep(0.05)
         return False
 
@@ -828,9 +954,14 @@ class BookingAutomation:
             if cell is None or not self._cell_is_available(cell):
                 await self._clear_selected_slots(page)
                 return False
-            await self._snapshot_cell_locator(page, cell).click()
+            block = self._snapshot_cell_locator(page, cell)
+            started = asyncio.get_running_loop().time()
+            await block.click()
+            self.store.add_event("info", "candidate_click",
+                f"场馆 {candidate.slot.venue_id} {item.court} {item.time_label}：点击耗时 "
+                f"{(asyncio.get_running_loop().time() - started) * 1000:.0f}ms")
             expected.add(item)
-            if not await self._wait_for_exact_selection(page, expected):
+            if not await self._wait_for_exact_selection(page, expected, clicked=block):
                 await self._clear_selected_slots(page)
                 return False
         return bool(expected)
@@ -1074,29 +1205,39 @@ class BookingAutomation:
         candidates: list[LocatedCandidate],
         plan: DailyPlan,
         venue_pages: dict[str, Any],
+        *,
+        deadline: float | None = None,
     ) -> None:
-        while candidates:
+        deadline = self._candidate_deadline() if deadline is None else deadline
+        refreshes = 0
+        while True:
             restart_from_booking_start = False
             for candidate in candidates:
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise BookingError("场地读取和选择已达到总时限，未提交订单")
                 self._active_page = candidate.page
-                try:
-                    await candidate.page.bring_to_front()
-                except Exception:
-                    pass
                 self._set_stage(
                     "选择场地",
                     f"尝试场馆 {candidate.slot.venue_id}：{candidate.slot.label}",
                 )
-                if candidate.selections:
-                    selected = await self._select_candidate_slots(candidate)
-                else:
-                    item = candidate.locator
-                    if item is None:
-                        item = candidate.page.locator(candidate.selector).nth(candidate.slot.dom_index)
-                    if not await item.is_visible() or not await item.is_enabled():
-                        continue
-                    await item.click()
-                    selected = await self._wait_for_slot_selection(candidate.page)
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        try:
+                            await candidate.page.bring_to_front()
+                        except Exception:
+                            pass
+                        if candidate.selections:
+                            selected = await self._select_candidate_slots(candidate)
+                        else:
+                            item = candidate.locator
+                            if item is None:
+                                item = candidate.page.locator(candidate.selector).nth(candidate.slot.dom_index)
+                            if not await item.is_visible() or not await item.is_enabled():
+                                continue
+                            await item.click()
+                            selected = await self._wait_for_slot_selection(candidate.page)
+                except TimeoutError as exc:
+                    raise BookingError("场地读取和选择已达到总时限，未提交订单") from exc
                 if not selected:
                     self.store.add_event(
                         "warning",
@@ -1105,6 +1246,11 @@ class BookingAutomation:
                     )
                     continue
                 self._set_stage("场地已选", f"场馆 {candidate.slot.venue_id} 的候选格已选中")
+                elapsed = asyncio.get_running_loop().time() - (
+                    deadline - self.config.browser.availability_timeout_seconds
+                )
+                self.store.add_event("info", "candidate_selected",
+                    f"从本轮读取候选到选中场地共 {elapsed * 1000:.0f}ms")
                 await self._select_first_companion(candidate.page)
                 self._set_stage("选择同伴", "已选择第一位可用同伴")
                 await self._accept_terms(candidate.page)
@@ -1123,18 +1269,6 @@ class BookingAutomation:
 
                 if state == "companion_missing":
                     raise CalibrationRequired("提交被页面拒绝：同伴不能小于1人，说明同伴未成功选中")
-                if state == "submit_conflict":
-                    self._set_stage(
-                        "订单冲突",
-                        "提交订单时场地已被他人预订，刷新页面并重新执行预约流程",
-                        level="warning",
-                    )
-                    await self._restart_booking_pages(venue_pages, plan)
-                    candidates = await self._load_candidates_with_refresh(
-                        venue_pages, plan
-                    )
-                    restart_from_booking_start = True
-                    break
                 if state == "captcha":
                     payment_succeeded = await self._handle_captcha(
                         candidate.page, plan, candidate.slot
@@ -1175,10 +1309,43 @@ class BookingAutomation:
                 raise BookingError("提交后的页面状态无法确认。为避免重复订单，程序已停止")
             if restart_from_booking_start:
                 if not candidates:
-                    raise BookingError("订单冲突后刷新页面，但没有找到新的可预约场地")
+                    raise BookingError("支付重试后刷新页面，但没有找到新的可预约场地")
+                deadline = self._candidate_deadline()
+                refreshes = 0
                 continue
-            break
-        raise BookingError("所有候选场地都已被占用")
+            if refreshes >= self.config.browser.availability_refresh_count - 1:
+                raise BookingError("候选场地未能选中，重新扫描次数已用尽，未提交订单")
+            if asyncio.get_running_loop().time() >= deadline:
+                raise BookingError("场地读取和选择已达到总时限，未提交订单")
+            refreshes += 1
+            self._set_stage("重新检测场地", f"旧候选已失效，刷新并重新扫描 {refreshes}", level="warning")
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await asyncio.sleep(self.config.browser.availability_refresh_interval_seconds)
+                    await self._restart_booking_pages(venue_pages, plan)
+                    candidates = await self._collect_candidates(venue_pages, plan)
+            except TimeoutError as exc:
+                raise BookingError("重新扫描可预约场地超时，未提交订单") from exc
+
+    async def _detect_submit_conflict(self, page: Any) -> bool:
+        """备用能力：正常提交状态检测不调用，须另行校准后显式接入。"""
+        return await self._first_visible_across_frames_with_fallback(
+            page, "submit_conflict_markers",
+            ("text=订单冲突", "text=场地冲突", "text=该场地已被预订", "text=已被他人预订"),
+        ) is not None
+
+    async def _recover_submit_conflict(
+        self, venue_pages: dict[str, Any], plan: DailyPlan
+    ) -> list[LocatedCandidate]:
+        """备用能力：仅在明确确认订单冲突后使用；正常预约流程不调用。"""
+        self._set_stage("订单冲突", "重新读取场馆日期和可预约场地", level="warning")
+        deadline = self._candidate_deadline()
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._restart_booking_pages(venue_pages, plan)
+                return await self._load_candidates_with_refresh(venue_pages, plan, deadline=deadline)
+        except TimeoutError as exc:
+            raise BookingError("订单冲突备用恢复超时") from exc
 
     async def _restart_booking_pages(
         self, venue_pages: dict[str, Any], plan: DailyPlan
@@ -1192,9 +1359,7 @@ class BookingAutomation:
                 for venue_id, page in venue_pages.items()
             )
         )
-        await asyncio.gather(
-            *(self._select_target_date(page, plan) for page in venue_pages.values())
-        )
+        await self._prepare_venue_pages(venue_pages, plan)
 
     async def _confirm_submit(
         self,
@@ -1567,29 +1732,19 @@ class BookingAutomation:
             solved = await self.captcha_solver.solve(challenge)
         except AutoCaptchaUnavailable as exc:
             self.store.add_event("warning", "captcha_auto_unavailable", str(exc))
-            self._notify(
-                "自动验证码尚未接入",
-                "已自动切换为人工验证码，请远程处理。",
-                silent=True,
-            )
-            return await self._wait_for_manual_captcha(page, plan, slot)
+            raise BookingError(f"自动验证码不可用：{exc}；人工点选已禁用") from exc
         except Exception as exc:
             self.store.add_event("error", "captcha_auto_error", str(exc))
-            self._notify(
-                "自动验证码执行失败",
-                "自动接口发生错误，已切换为人工验证码。",
-                silent=True,
-            )
-            return await self._wait_for_manual_captcha(page, plan, slot)
+            raise BookingError(f"自动验证码执行失败：{exc}；人工点选已禁用") from exc
 
         if not solved:
             payment_page = await self._find_payment_page(page)
             if payment_page is not None:
                 return await self._on_payment(payment_page, plan, slot)
-            self.store.add_event(
-                "warning", "captcha_auto_failed", "自动求解器未完成验证码"
-            )
-            return await self._wait_for_manual_captcha(page, plan, slot)
+            reason = getattr(self.captcha_solver, "last_failure_reason", "")
+            message = "自动求解器未完成验证码" + (f"：{reason}" if reason else "")
+            self.store.add_event("warning", "captcha_auto_failed", message)
+            raise BookingError(f"{message}；人工点选已禁用")
 
         self._set_stage("自动验证码", "验证码点击已提交，等待支付页面确认结果")
         deadline = (
@@ -1605,9 +1760,9 @@ class BookingAutomation:
         if payment_page is not None:
             return await self._on_payment(payment_page, plan, slot)
         self.store.add_event(
-            "warning", "captcha_auto_unconfirmed", "无法确认自动验证码结果，改为人工处理"
+            "warning", "captcha_auto_unconfirmed", "无法确认自动验证码结果；人工点选已禁用"
         )
-        return await self._wait_for_manual_captcha(page, plan, slot)
+        raise BookingError("无法确认自动验证码结果；人工点选已禁用")
 
     async def _find_payment_page(self, page: Any) -> Any | None:
         pages = [page]
@@ -1874,9 +2029,14 @@ class BookingAutomation:
                         return "captcha"
                 if await self._has_companion_required_error(page):
                     return "companion_missing"
-                if await self._any_visible_across_frames(page, "submit_conflict_markers"):
-                    return "submit_conflict"
+                # 订单冲突检测/恢复仅保留为备用，不接入正常预约流程。
                 if await self._any_visible_across_frames(page, "captcha_markers"):
+                    response_task = monitor["response_task"]
+                    if response_task is not None and not response_task.done():
+                        await asyncio.sleep(0.05)
+                        continue
+                    if response_task is not None:
+                        response_task.result()
                     return "captcha"
                 if await self._is_payment_page(page):
                     return "payment"
@@ -1902,6 +2062,9 @@ class BookingAutomation:
         }
         self._captcha_response_payload = None
         self._captcha_image_bytes = None
+        self._captcha_word_list = None
+        self._captcha_token = None
+        self._captcha_secret_key = None
 
         async def read_captcha_response(response: Any) -> None:
             headers = getattr(response, "headers", {})
