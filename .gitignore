@@ -9,7 +9,6 @@ config/booking.json
 
 # 本机测试、调试配置和报告不进入运行版本。
 .vscode/
-tests/
 config/booking.debug.json
 scripts/*_debug.ps1
 scripts/benchmark_*.py
@@ -20,3 +19,22 @@ docs/代码审查.md
 docs/*实测_*.md
 docs/故障修复_*.md
 *.log
+
+# Public release archives, private audits, credentials, and editor metadata.
+dist/
+build/
+.release-private/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.pem
+*.key
+config/*.json
+!config/booking.example.json
+.idea/
+.DS_Store
+Thumbs.db

@@ -18,7 +18,7 @@
     "public_url": "https://YOUR-PC.YOUR-TAILNET.ts.net"
   },
   "notification": {
-    "provider": "bark",
+    "provider": "console",
     "bark_server": "https://api.day.app",
     "remote_control_url": "https://remotedesktop.google.com/access/",
     "emergency_level": "critical",

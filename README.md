@@ -4,7 +4,9 @@
 
 预约时间支持整点起止的一小时或连续两小时。填写 `16:00–18:00` 时，程序选择 `16:00–17:00` 和 `17:00–18:00` 两个格子，一次提交。优先选择同一块场地连续两小时；没有这种组合时，在同一场馆内换场补足两个时段，不跨场馆拼单。任一时段未选中时不会提交部分订单。
 
-进入支付页后，程序会点击付款入口、生成支付二维码并发送到手机；不会点击最终支付确认按钮。
+进入支付页后，程序会点击付款入口并生成支付二维码；配置 Bark 后可将链接发送到手机。最终付款由用户确认。
+
+公开版包含源码、无账号配置模板和离线测试。模板默认使用 Console 通知及人工验证码；项目暂未指定开源许可证。下载后请从项目根目录执行命令，按现场页面核对日期偏移、场馆和选择器。
 
 > 重要：真实流程可能创建真实订单。首次使用请先完成校准，并确认配置中的日期、时间、场馆和账号无误。
 
@@ -22,11 +24,12 @@
 - 页面校准、截图和本地调试产物
 
 详细逻辑见 [docs/项目逻辑说明.md](docs/项目逻辑说明.md)。
+公开分发见 [发布说明](docs/发布说明.md)，开发检查见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私处理见 [SECURITY.md](SECURITY.md)。
 
 ## 运行环境
 
 - Windows 10 或 Windows 11
-- Python 3.12
+- Python 3.12 或更高版本（当前离线验证使用 Python 3.12）
 - 可访问北航预约网站的网络环境（校园网或学校 VPN）
 - Chromium 浏览器（由 Playwright 安装）
 - 可选：Bark、Tailscale、远程桌面工具
@@ -85,6 +88,10 @@ config/booking.json
 - `browser.captcha_mode`
 - `selectors`
 
+模板中的 `days_ahead`、开售时间和场馆编号仅作示例，不代表当前网站规则。`target_date = run_date + days_ahead`，其中 `run_date` 是程序运行日期。修改模板不会更新已有本机配置。
+
+默认 `notification.provider` 为 `console`，通知仅打印到终端。需要手机通知时，在本机配置中改为 `bark`，设置自己的 `dashboard.public_url`，并保存 Bark Device Key。不要把本机 URL 或凭据写回示例模板。
+
 配置中的路径应使用相对路径，例如：
 
 ```json
@@ -109,7 +116,7 @@ config/booking.json
 - 统一身份认证密码
 - Bark Device Key（可选）
 
-测试通知：
+测试当前通知方式（Console 打印到终端；Bark 会向手机发送通知）：
 
 ```powershell
 .\.venv\Scripts\python.exe -m buaa_booking test-notification
@@ -236,7 +243,7 @@ $RunDate = (Get-Date).ToString("yyyy-MM-dd")
 
 ## 版本范围
 
-项目保留运行代码、安装脚本、配置模板和必要说明。后续运行生成的数据和截图不纳入版本库。自动验证码失败时不会回退人工处理，当前版本不保证 5 秒内点击支付。
+项目保留运行代码、安装脚本、配置模板、离线回归测试和必要说明。后续运行生成的数据和截图不纳入版本库。自动验证码失败时不会回退人工处理，当前版本不保证 5 秒内点击支付。
 
 ## Windows 定时任务
 
@@ -246,7 +253,7 @@ $RunDate = (Get-Date).ToString("yyyy-MM-dd")
 .\scripts\install_tasks.ps1
 ```
 
-脚本会使用当前 Conda 环境，或使用参数显式指定 Python：
+脚本优先使用项目 `.venv`，缺省时再使用当前 Conda 环境，也可用参数显式指定 Python：
 
 ```powershell
 .\scripts\install_tasks.ps1 -PythonExe ((Resolve-Path .\.venv\Scripts\python.exe).Path)
@@ -262,6 +269,8 @@ $RunDate = (Get-Date).ToString("yyyy-MM-dd")
 | `BUAA-Badminton-Run` | 06:59 | 启动预约流程 |
 
 下一次晚间计划提醒会按计划确认状态重新启用或停用提醒任务。具体时间以配置和脚本当前实现为准。
+
+脚本会注册或覆盖当前用户的上述四个同名任务，并立即启动 Dashboard。安装前先核对本机配置；这一步属于正式运行设置，不是发布包的离线验证步骤。
 
 ## 常用命令
 
@@ -292,19 +301,25 @@ $RunDate = (Get-Date).ToString("yyyy-MM-dd")
 README.md                    安装、配置和日常使用
 pyproject.toml               包定义、依赖和命令入口
 requirements.txt             pip 依赖清单
+SECURITY.md                  隐私、设置页和问题报告说明
+CONTRIBUTING.md              离线开发与贡献说明
 config/
   booking.example.json       可提交的配置模板
   booking.json               本机配置，不提交
 scripts/
   setup.ps1                  安装项目和 Playwright
   install_tasks.ps1          注册 Windows 定时任务
+  build_public_release.py    按公开文件清单检查并生成源码包
 src/buaa_booking/            主程序代码
+tests/                      使用模板及本地网页的离线回归测试
 data/
   browser-profile/           正式浏览器登录状态，不提交
   state.sqlite3              正式预约计划和运行事件，不提交
 artifacts/                   按日期保存的运行日志、截图、支付二维码及校准结果
 docs/
   项目逻辑说明.md            逻辑板块说明
+  发布说明.md                公开源码包、校验和与新仓库发布流程
+dist/                       生成的公开 ZIP 和摘要，不提交
 ```
 
 `src/` 按预约流程、验证码、手机设置页、配置、状态存储和通知划分模块。安装脚本和定时任务通过 `python -m buaa_booking` 启动，运行路径保持固定。
@@ -326,7 +341,17 @@ docs/
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall -q src
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe scripts/build_public_release.py --check
 git diff --check
 ```
 
 真实流程测试必须连接目标网站，不能在离线环境中假定其结果。
+
+生成可公开分发的独立源码包：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/build_public_release.py
+```
+
+文件输出到 `dist/`，包含 ZIP、外部 SHA-256 摘要以及包内逐文件 `SHA256SUMS`。只上传生成的包；原目录包含私有运行数据，旧 Git 历史也未经完整脱敏认证。需要公开仓库时，按 [发布说明](docs/发布说明.md) 在独立解压目录初始化新仓库。

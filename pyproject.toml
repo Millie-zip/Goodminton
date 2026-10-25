@@ -8,6 +8,14 @@ version = "0.1.0"
 description = "BUAA badminton reservation assistant with an iPhone control page"
 readme = "README.md"
 requires-python = ">=3.12"
+keywords = ["buaa", "badminton", "playwright", "windows"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+]
 dependencies = [
   "keyring>=25,<27",
   "numpy>=1.26,<3",

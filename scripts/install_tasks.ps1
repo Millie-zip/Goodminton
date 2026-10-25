@@ -8,10 +8,17 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
 
 if ([string]::IsNullOrWhiteSpace($PythonExe)) {
-    if ([string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
-        throw "No active Conda environment. Activate buaa-booking before running this script."
+    $ProjectPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $ProjectPython) {
+        $PythonExe = $ProjectPython
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:CONDA_PREFIX)) {
+        $PythonExe = Join-Path $env:CONDA_PREFIX "python.exe"
+    } else {
+        throw "Run scripts/setup.ps1 first, or pass -PythonExe with an installed project environment."
     }
-    $PythonExe = Join-Path $env:CONDA_PREFIX "python.exe"
+}
+if (-not [System.IO.Path]::IsPathRooted($PythonExe)) {
+    $PythonExe = Join-Path $ProjectRoot $PythonExe
 }
 $PythonExe = [System.IO.Path]::GetFullPath($PythonExe)
 if (-not (Test-Path -LiteralPath $PythonExe)) {
@@ -19,11 +26,14 @@ if (-not (Test-Path -LiteralPath $PythonExe)) {
 }
 & $PythonExe -c "import buaa_booking" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    throw "The active Conda environment does not contain buaa_booking. Install the project before registering tasks."
+    throw "The selected Python cannot import buaa_booking. Install the project in that environment first."
 }
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $ConfigPath = Join-Path $ProjectRoot "config\booking.json"
+}
+if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
+    $ConfigPath = Join-Path $ProjectRoot $ConfigPath
 }
 $ConfigPath = [System.IO.Path]::GetFullPath($ConfigPath)
 if (-not (Test-Path -LiteralPath $ConfigPath)) {

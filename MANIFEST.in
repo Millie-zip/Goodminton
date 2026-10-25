@@ -1,0 +1,13 @@
+include README.md requirements.txt SECURITY.md CONTRIBUTING.md
+include .gitignore .gitattributes
+include config/booking.example.json
+include scripts/setup.ps1 scripts/install_tasks.ps1 scripts/build_public_release.py
+include docs/项目逻辑说明.md docs/发布说明.md
+prune tests
+include tests/test_availability.py tests/test_captcha.py tests/test_dates.py tests/test_release.py
+prune data
+prune artifacts
+prune .release-private
+prune dist
+prune build
+global-exclude *.py[cod] *.log *.sqlite* *.db .env .env.*
