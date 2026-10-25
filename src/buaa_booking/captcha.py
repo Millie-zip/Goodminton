@@ -11,6 +11,7 @@ import shutil
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 from importlib import import_module
@@ -348,13 +349,10 @@ class LocalClickCaptchaSolver:
 
     def _recognize_targets(self, image_bytes: bytes, targets: list[str]) -> list[OCRChar]:
         """Retry rotated, enlarged views only when the normal OCR misses a target."""
-        import cv2
-        import numpy as np
+        from PIL import Image
 
-        image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise AutoCaptchaUnavailable("验证码图片无法解码")
-        height, width = image.shape[:2]
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        width, height = image.size
         chars = self._without_footer(self._run_ocr(image_bytes), width, height)
 
         def complete() -> bool:
@@ -368,24 +366,28 @@ class LocalClickCaptchaSolver:
 
         if complete():
             return chars
-        enlarged = cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        enlarged_height, enlarged_width = enlarged.shape[:2]
+        segmented = self._recognize_colored_glyphs(image, targets=targets)
+        if segmented:
+            original_chars = chars
+            chars = self._without_footer(segmented, width, height)
+            if complete():
+                return chars
+            # A detector box can span background objects and several letters.
+            # Prefer centers from isolated glyphs and only retain nearby boxes.
+            chars.extend(c for c in original_chars if not any(
+                math.hypot(c.x - glyph.x, c.y - glyph.y) < 12 for glyph in chars
+            ))
+        enlarged = image.resize((width * 2, height * 2))
+        enlarged_width, enlarged_height = enlarged.size
         for angle in (0, -30, 30, -45, 45, -15, 15):
-            matrix = cv2.getRotationMatrix2D((enlarged_width / 2, enlarged_height / 2), angle, 1)
-            cosine, sine = abs(matrix[0, 0]), abs(matrix[0, 1])
-            rotated_width = int(enlarged_height * sine + enlarged_width * cosine)
-            rotated_height = int(enlarged_height * cosine + enlarged_width * sine)
-            matrix[0, 2] += (rotated_width - enlarged_width) / 2
-            matrix[1, 2] += (rotated_height - enlarged_height) / 2
-            rotated = cv2.warpAffine(
-                enlarged, matrix, (rotated_width, rotated_height), borderValue=(255, 255, 255),
-            )
-            ok, encoded = cv2.imencode(".png", rotated)
-            if not ok:
-                continue
-            inverse = cv2.invertAffineTransform(matrix)
-            for char in self._run_ocr(encoded.tobytes()):
-                x, y = inverse @ np.array([char.x, char.y, 1.0]) / 2
+            rotated = enlarged.rotate(angle, expand=True, fillcolor="white")
+            encoded = BytesIO()
+            rotated.save(encoded, format="PNG")
+            cosine, sine = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+            for char in self._run_ocr(encoded.getvalue()):
+                dx, dy = char.x - rotated.width / 2, char.y - rotated.height / 2
+                x = (cosine * dx - sine * dy + enlarged_width / 2) / 2
+                y = (sine * dx + cosine * dy + enlarged_height / 2) / 2
                 candidate = OCRChar(char.char, float(x), float(y), char.score)
                 if not self._is_valid_ocr_position(candidate, width, height):
                     continue
@@ -400,6 +402,87 @@ class LocalClickCaptchaSolver:
             if complete():
                 break
         return chars
+
+    def _recognize_colored_glyphs(
+        self, image: Any, *, targets: list[str] | None = None,
+    ) -> list[OCRChar]:
+        """Separate flat ink colors before recognizing individual rotated glyphs."""
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageOps
+
+        rgb = np.asarray(image)
+        height, width = rgb.shape[:2]
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        eligible = ((hsv[:, :, 1] > 60) | (hsv[:, :, 2] < 100)) & (hsv[:, :, 2] < 245)
+        # Flat background stripes can precede a glyph color in the histogram.
+        # Keep enough candidates to avoid unnecessary whole-image OCR retries.
+        colors = Counter(map(tuple, rgb[eligible])).most_common(64)
+        centers: list[tuple[float, float]] = []
+        glyphs: list[tuple[Any, float, float]] = []
+        rgb_float = rgb.astype(np.float32)
+        minimum_count = max(20, int(width * height * 0.0004))
+        for color, count in colors:
+            if count < minimum_count:
+                break
+            mask = (np.linalg.norm(rgb_float - color, axis=2) < 50).astype(np.uint8)
+            _, _, stats, component_centers = cv2.connectedComponentsWithStats(
+                cv2.dilate(mask, np.ones((3, 3), dtype=np.uint8)),
+            )
+            for (x, y, w, h, area), (cx, cy) in zip(stats[1:], component_centers[1:]):
+                if (min(w, h) < max(10, height * 0.07)
+                        or max(w, h) > height * 0.5 or area < 60
+                        or not 0.4 <= w / h <= 2.5
+                        or any(math.hypot(cx - a, cy - b) < 12 for a, b in centers)):
+                    continue
+                centers.append((float(cx), float(cy)))
+                glyph = Image.fromarray(255 - mask[y:y + h, x:x + w] * 255).convert("RGB")
+                glyph = glyph.resize((int(w * 2), int(h * 2)))
+                glyphs.append((glyph, float(cx), float(cy)))
+                if len(centers) >= 12:
+                    break
+            if len(centers) >= 12:
+                break
+        if not glyphs:
+            return []
+        best: dict[tuple[str, float, float], OCRChar] = {}
+        # Try three common views first. Hard glyphs retain all original angles.
+        for angles in ((0, -30, 30), (-45, 45, -15, 15, -60, 60)):
+            crops: list[Any] = []
+            crop_centers: list[tuple[float, float]] = []
+            for glyph, x, y in glyphs:
+                for angle in angles:
+                    rotated = glyph.rotate(angle, expand=True, fillcolor="white")
+                    bounds = ImageOps.invert(rotated.convert("L")).getbbox()
+                    if bounds is None:
+                        continue
+                    rotated = ImageOps.expand(rotated.crop(bounds), border=10, fill="white")
+                    crops.append(cv2.cvtColor(np.asarray(rotated), cv2.COLOR_RGB2BGR))
+                    crop_centers.append((x, y))
+            if not crops:
+                continue
+            results, _ = self.ocr.text_rec(crops)
+            for (text, score), (x, y) in zip(results, crop_centers):
+                text = self._normalize_ocr_char(text)
+                score = float(score)
+                if len(text) != 1 or not self._is_valid_char(text) or not math.isfinite(score):
+                    continue
+                if score < self.confidence_threshold:
+                    continue
+                key = (text, x, y)
+                if key not in best or score > best[key].score:
+                    best[key] = OCRChar(text, x, y, score)
+            if targets:
+                confident = [char for char in best.values() if char.score >= max(0.98, self.confidence_threshold)]
+                used: set[int] = set()
+                for target in targets:
+                    candidate = self._find_best_char(target, confident, used)
+                    if candidate is None:
+                        break
+                    used.add(candidate[0])
+                else:
+                    return list(best.values())
+        return list(best.values())
 
     def _run_ocr(
         self,
